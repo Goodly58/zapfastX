@@ -6,7 +6,7 @@ name: Check patches
 
 on:
   push:
-    paths: ["patches/**", ".github/workflows/check.yml"]
+    paths: ["patches/**", "scripts/**", ".github/workflows/check.yml"]
   workflow_dispatch:
     inputs:
       ref:
@@ -53,7 +53,7 @@ jobs:
       - name: Apply the patches
         working-directory: zapfast
         run: |
-          for patch in ../fork/patches/*.patch; do git apply --verbose "$patch"; done
+          bash ../fork/scripts/apply-patches.sh ../fork/patches
           cp ../fork/update-public-key.hex assets/update-public-key.hex
       - name: GUI build dependencies
         run: |

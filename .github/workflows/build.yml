@@ -106,7 +106,7 @@ jobs:
       - name: Apply the patches
         shell: bash
         run: |
-          for patch in ../fork/patches/*.patch; do git apply --verbose "$patch"; done
+          bash ../fork/scripts/apply-patches.sh ../fork/patches
           cp ../fork/update-public-key.hex assets/update-public-key.hex
           version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
           test "$TAG" = "v$version"
@@ -199,7 +199,7 @@ jobs:
           path: zapfast
       - name: Apply the patches
         run: |
-          for patch in ../fork/patches/*.patch; do git apply --verbose "$patch"; done
+          bash ../fork/scripts/apply-patches.sh ../fork/patches
           cp ../fork/update-public-key.hex assets/update-public-key.hex
           version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
           test "$TAG" = "v$version"
