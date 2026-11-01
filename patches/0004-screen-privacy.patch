@@ -403,7 +403,7 @@ index aec3bb0..be70dbb 100644
          app.actions.push(Action::OpenChat(chat.id.clone()));
      }
 diff --git a/src/ui/conversation.rs b/src/ui/conversation.rs
-index 527d65a..a7925b0 100644
+index 527d65a..c731dd1 100644
 --- a/src/ui/conversation.rs
 +++ b/src/ui/conversation.rs
 @@ -17,6 +17,7 @@ use crate::model::{
@@ -577,19 +577,19 @@ index 527d65a..a7925b0 100644
  /// Clamps message-selection drags to the view while the pointer is outside it.
  /// This keeps a row under the pointer during edge scrolling. The input hook
  /// adjusts positions before egui processes them, using the previous frame's
-@@ -4507,6 +4589,12 @@ fn bubble_frame(
-                         Sense::CLICK,
-                     )
-                     .on_hover_cursor(egui::CursorIcon::PointingHand);
+@@ -4500,6 +4582,12 @@ fn bubble_frame(
+                     theme::semibold(13.0),
+                     palette.sender(crate::util::hue(&message.sender)),
+                 );
 +                if view
 +                    .screen_privacy
-+                    .hides(ScreenPrivacyWhat::Name, response.hovered())
++                    .hides(ScreenPrivacyWhat::Name, ui.rect_contains_pointer(response.rect))
 +                {
 +                    widgets::privacy_cover(ui, response.rect, view.palette.surface_hover, 6.0);
 +                }
-                 if response.clicked() {
-                     actions.push(Action::OpenInfo(message.sender.clone()));
-                 }
+                 let response = ui
+                     .interact(
+                         response.rect,
 @@ -4946,7 +5034,20 @@ fn quote_block(
                  |ui| {
                      ui.set_width(inner_width);
