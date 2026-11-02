@@ -146,7 +146,13 @@ jobs:
       - name: Windows Installer package
         shell: pwsh
         run: |
-          gem install native-packages --version 0.10.0 --no-document
+          # The native-packages version upstream's own release uses, so this
+          # release's packaging config is understood.
+          $np = (Select-String -Path .github\workflows\release.yml `
+            -Pattern 'gem install native-packages --version ([0-9.]+)' |
+            Select-Object -First 1).Matches.Groups[1].Value
+          if (-not $np) { $np = "0.11.0" }
+          gem install native-packages --version $np --no-document
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           dotnet tool install --global wix --version 5.0.2
           wix extension add --global WixToolset.Util.wixext/5.0.2
@@ -224,7 +230,10 @@ jobs:
           ruby-version: '4.0'
       - name: App bundle and disk image
         run: |
-          gem install native-packages --version 0.10.0 --no-document
+          # The native-packages version upstream's own release uses.
+          np=$(sed -n 's/.*gem install native-packages --version \([0-9.]*\).*/\1/p' \
+            .github/workflows/release.yml | head -n 1)
+          gem install native-packages --version "${np:-0.11.0}" --no-document
           version="${TAG#v}"
           mkdir -p dist/macos-input
           bash packaging/macos/bundle.sh universal/zapfast dist/macos-input/ZapFast.app "$version"
