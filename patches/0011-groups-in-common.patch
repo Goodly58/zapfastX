@@ -14,14 +14,33 @@ index 4d5bbd4..5ed6ebc 100644
  select and copy its text, and a long description scrolls. To change the
  description, use your phone.
 diff --git a/src/ui/info.rs b/src/ui/info.rs
-index 0acfd0d..5553e9a 100644
+index 0acfd0d..70eb150 100644
 --- a/src/ui/info.rs
 +++ b/src/ui/info.rs
-@@ -723,6 +723,13 @@ fn identity(app: &mut App, ui: &mut egui::Ui, shown: &Shown, overlay: bool) {
+@@ -26,7 +26,8 @@ const ROW_HEIGHT: f32 = 60.0;
+ /// group photo, the rename pencil, the name editor's check, the action
+ /// buttons, the media row, the group's permissions row, Add members, the
+ /// invite link's buttons, the media view's tabs (or the permission
+-/// switches), Leave, and Try again.
++/// switches), Leave, and Try again; a person's groups in common come last, one
++/// stop per row.
+ const PHOTO_STOP: u8 = 0;
+ const PENCIL_STOP: u8 = 1;
+ const NAME_CHECK_STOP: u8 = 2;
+@@ -41,6 +42,7 @@ const TAB_STOP: u8 = 20;
+ const LEAVE_STOP: u8 = 30;
+ const RETRY_STOP: u8 = 31;
+ const TIMER_STOP: u8 = 32;
++const GROUPS_STOP: u8 = 40;
+ 
+ /// The media view's title, and the overview row that opens it.
+ fn media_title(app: &App) -> String {
+@@ -723,6 +725,14 @@ fn identity(app: &mut App, ui: &mut egui::Ui, shown: &Shown, overlay: bool) {
          ui.add_space(8.0);
          media_row(app, ui, id, overlay);
      }
-+    if !shown.group && !shown.channel && !mine {
++    // Our own details, under either of our ids, share no groups with us.
++    if !shown.group && !shown.channel && !app.our_ids().contains(&id) {
 +        let groups = groups_in_common(app, id);
 +        if !groups.is_empty() {
 +            ui.add_space(8.0);
@@ -31,7 +50,7 @@ index 0acfd0d..5553e9a 100644
      if shown.can_manage {
          ui.add_space(4.0);
          let label = crate::i18n::gettext(app.locale, "Group permissions");
-@@ -1087,6 +1094,107 @@ fn members(app: &mut App, ui: &mut egui::Ui, shown: &Shown, window: f32, photo:
+@@ -1087,6 +1097,120 @@ fn members(app: &mut App, ui: &mut egui::Ui, shown: &Shown, window: f32, photo:
      }
  }
  
@@ -75,18 +94,26 @@ index 0acfd0d..5553e9a 100644
 +    let row_height = 30.0;
 +    let mut open = None;
 +    ui.scope(|ui| {
-+        // `show_rows` reads the spacing from outside its closure.
 +        ui.spacing_mut().item_spacing.y = 0.0;
-+        egui::ScrollArea::vertical()
++        // Every row is laid out, not only the visible ones, so Tab reaches
++        // each group and the list scrolls to the one with the focus.
++        let mut focused = false;
++        let list = egui::ScrollArea::vertical()
 +            .id_salt(("groups-in-common", person))
 +            .max_height(row_height * 6.0)
 +            .auto_shrink([false, true])
-+            .show_rows(ui, row_height, groups.len(), |ui, range| {
-+                for (group, name) in &groups[range] {
++            .show(ui, |ui| {
++                for (index, (group, name)) in groups.iter().enumerate() {
 +                    let (rect, response) = ui.allocate_exact_size(
 +                        egui::vec2(ui.available_width(), row_height),
 +                        egui::Sense::click(),
 +                    );
++                    let slot = u8::try_from(index).unwrap_or(u8::MAX);
++                    let stop = Stop::InfoControl(GROUPS_STOP.saturating_add(slot));
++                    let response = response.tab_stop(stop);
++                    focused |= response.gained_focus();
++                    theme::reveal_focus(&response);
++                    theme::focus_outline(ui, response.id, rect, 6.0);
 +                    response.widget_info(|| {
 +                        egui::WidgetInfo::labeled(egui::WidgetType::Button, true, name)
 +                    });
@@ -129,6 +156,11 @@ index 0acfd0d..5553e9a 100644
 +                    }
 +                }
 +            });
++        // The list's own scrolling stops at its edge, so the panel brings the
++        // list into view too when Tab lands on a row below its fold.
++        if focused {
++            ui.scroll_to_rect(list.inner_rect, None);
++        }
 +    });
 +    if let Some(group) = open {
 +        app.actions
@@ -139,7 +171,7 @@ index 0acfd0d..5553e9a 100644
  /// The "Media, links and docs" row: its count once the listing is in, a
  /// chevron, and the newest pictures under it. The row opens the media view;
  /// a picture goes to its message.
-@@ -2262,4 +2370,43 @@ mod tests {
+@@ -2262,4 +2386,43 @@ mod tests {
              "attacker.example"
          );
      }
