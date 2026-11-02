@@ -14,7 +14,7 @@ index 4d5bbd4..5ed6ebc 100644
  select and copy its text, and a long description scrolls. To change the
  description, use your phone.
 diff --git a/src/ui/info.rs b/src/ui/info.rs
-index 0acfd0d..70eb150 100644
+index 0acfd0d..5191dd2 100644
 --- a/src/ui/info.rs
 +++ b/src/ui/info.rs
 @@ -26,7 +26,8 @@ const ROW_HEIGHT: f32 = 60.0;
@@ -50,7 +50,7 @@ index 0acfd0d..70eb150 100644
      if shown.can_manage {
          ui.add_space(4.0);
          let label = crate::i18n::gettext(app.locale, "Group permissions");
-@@ -1087,6 +1097,120 @@ fn members(app: &mut App, ui: &mut egui::Ui, shown: &Shown, window: f32, photo:
+@@ -1087,6 +1097,122 @@ fn members(app: &mut App, ui: &mut egui::Ui, shown: &Shown, window: f32, photo:
      }
  }
  
@@ -104,10 +104,12 @@ index 0acfd0d..70eb150 100644
 +            .auto_shrink([false, true])
 +            .show(ui, |ui| {
 +                for (index, (group, name)) in groups.iter().enumerate() {
-+                    let (rect, response) = ui.allocate_exact_size(
-+                        egui::vec2(ui.available_width(), row_height),
-+                        egui::Sense::click(),
-+                    );
++                    // The id comes from the group alone, not its place in the
++                    // list, so focus stays with the group when the list reorders.
++                    let size = egui::vec2(ui.available_width(), row_height);
++                    let (_, rect) = ui.allocate_space(size);
++                    let id = ui.make_persistent_id(group);
++                    let response = ui.interact(rect, id, egui::Sense::click());
 +                    let slot = u8::try_from(index).unwrap_or(u8::MAX);
 +                    let stop = Stop::InfoControl(GROUPS_STOP.saturating_add(slot));
 +                    let response = response.tab_stop(stop);
@@ -171,7 +173,7 @@ index 0acfd0d..70eb150 100644
  /// The "Media, links and docs" row: its count once the listing is in, a
  /// chevron, and the newest pictures under it. The row opens the media view;
  /// a picture goes to its message.
-@@ -2262,4 +2386,43 @@ mod tests {
+@@ -2262,4 +2388,43 @@ mod tests {
              "attacker.example"
          );
      }
