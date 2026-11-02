@@ -14,7 +14,7 @@ index 4d5bbd4..5ed6ebc 100644
  select and copy its text, and a long description scrolls. To change the
  description, use your phone.
 diff --git a/src/ui/info.rs b/src/ui/info.rs
-index 0acfd0d..db0f959 100644
+index 0acfd0d..5b46d48 100644
 --- a/src/ui/info.rs
 +++ b/src/ui/info.rs
 @@ -723,6 +723,13 @@ fn identity(app: &mut App, ui: &mut egui::Ui, shown: &Shown, overlay: bool) {
@@ -31,7 +31,7 @@ index 0acfd0d..db0f959 100644
      if shown.can_manage {
          ui.add_space(4.0);
          let label = crate::i18n::gettext(app.locale, "Group permissions");
-@@ -1087,6 +1094,100 @@ fn members(app: &mut App, ui: &mut egui::Ui, shown: &Shown, window: f32, photo:
+@@ -1087,6 +1094,101 @@ fn members(app: &mut App, ui: &mut egui::Ui, shown: &Shown, window: f32, photo:
      }
  }
  
@@ -125,14 +125,15 @@ index 0acfd0d..db0f959 100644
 +            });
 +    });
 +    if let Some(group) = open {
-+        app.actions.extend([Action::OpenChat(group), Action::CloseInfo]);
++        app.actions
++            .extend([Action::OpenChat(group), Action::CloseInfo]);
 +    }
 +}
 +
  /// The "Media, links and docs" row: its count once the listing is in, a
  /// chevron, and the newest pictures under it. The row opens the media view;
  /// a picture goes to its message.
-@@ -2262,4 +2363,39 @@ mod tests {
+@@ -2262,4 +2364,39 @@ mod tests {
              "attacker.example"
          );
      }
