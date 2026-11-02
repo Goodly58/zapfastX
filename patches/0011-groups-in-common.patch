@@ -1,5 +1,20 @@
+diff --git a/docs/_guide/using-zapfast.md b/docs/_guide/using-zapfast.md
+index 4d5bbd4..5ed6ebc 100644
+--- a/docs/_guide/using-zapfast.md
++++ b/docs/_guide/using-zapfast.md
+@@ -866,6 +866,10 @@ panel closes. In a narrow window the panel is a page of its own: **Back**
+ returns to the chat. A locked
+ chat's media is listed only while the locked folder is open.
+ 
++A person's details also list the groups you are both in, under a heading
++such as **3 groups in common**: click one to open it. Groups you left and
++locked chats are not listed.
++
+ **Development builds** also show a group's description in the panel. You can
+ select and copy its text, and a long description scrolls. To change the
+ description, use your phone.
 diff --git a/src/ui/info.rs b/src/ui/info.rs
-index 0acfd0d..d12353f 100644
+index 0acfd0d..db0f959 100644
 --- a/src/ui/info.rs
 +++ b/src/ui/info.rs
 @@ -723,6 +723,13 @@ fn identity(app: &mut App, ui: &mut egui::Ui, shown: &Shown, overlay: bool) {
@@ -16,14 +31,14 @@ index 0acfd0d..d12353f 100644
      if shown.can_manage {
          ui.add_space(4.0);
          let label = crate::i18n::gettext(app.locale, "Group permissions");
-@@ -1087,6 +1094,94 @@ fn members(app: &mut App, ui: &mut egui::Ui, shown: &Shown, window: f32, photo:
+@@ -1087,6 +1094,100 @@ fn members(app: &mut App, ui: &mut egui::Ui, shown: &Shown, window: f32, photo:
      }
  }
  
 +/// The groups `person` shares with us, by name, as `(id, name)`: those whose
 +/// member list includes them. Groups we left are not shared any more, and a
 +/// locked group stays in the locked folder rather than showing here.
-+pub(crate) fn groups_in_common(app: &App, person: &str) -> Vec<(String, String)> {
++fn groups_in_common(app: &App, person: &str) -> Vec<(String, String)> {
 +    let mut groups: Vec<(String, String)> = app
 +        .chats
 +        .iter()
@@ -40,7 +55,13 @@ index 0acfd0d..d12353f 100644
 +    let palette = app.palette;
 +    theme::text(
 +        ui,
-+        format!("Groups in common ({})", groups.len()),
++        crate::i18n::ngettext(
++            app.locale,
++            "{} group in common",
++            "{} groups in common",
++            groups.len() as u32,
++        )
++        .replace("{}", &groups.len().to_string()),
 +        theme::medium(12.5),
 +        palette.secondary,
 +    );
@@ -111,7 +132,7 @@ index 0acfd0d..d12353f 100644
  /// The "Media, links and docs" row: its count once the listing is in, a
  /// chevron, and the newest pictures under it. The row opens the media view;
  /// a picture goes to its message.
-@@ -2262,4 +2357,39 @@ mod tests {
+@@ -2262,4 +2363,39 @@ mod tests {
              "attacker.example"
          );
      }
