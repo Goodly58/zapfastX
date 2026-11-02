@@ -1,8 +1,8 @@
 diff --git a/src/ui/conversation.rs b/src/ui/conversation.rs
-index fc235fc..165ce01 100644
+index 5dff319..3deca29 100644
 --- a/src/ui/conversation.rs
 +++ b/src/ui/conversation.rs
-@@ -5246,23 +5246,15 @@ fn shown_delivery(view: &View<'_>, message: &Message) -> Delivery {
+@@ -6506,23 +6506,15 @@ fn shown_delivery(view: &View<'_>, message: &Message) -> Delivery {
      )
  }
  

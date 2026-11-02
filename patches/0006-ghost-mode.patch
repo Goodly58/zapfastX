@@ -1,8 +1,8 @@
 diff --git a/src/app.rs b/src/app.rs
-index 877b52b..f193637 100644
+index 695f0d6..7b26faa 100644
 --- a/src/app.rs
 +++ b/src/app.rs
-@@ -9004,8 +9004,11 @@ impl App {
+@@ -10376,8 +10376,11 @@ impl App {
      /// Tells the backend whether the person is looking at the app, so the
      /// phone keeps its notifications while they are not.
      fn report_presence(&mut self) {
@@ -17,7 +17,7 @@ index 877b52b..f193637 100644
          for (index, account) in self.accounts.iter_mut().enumerate() {
              let online = looking && index == active;
 diff --git a/src/settings.rs b/src/settings.rs
-index f44a371..6f53ac6 100644
+index 2bcbb12..2399077 100644
 --- a/src/settings.rs
 +++ b/src/settings.rs
 @@ -599,6 +599,8 @@ pub struct Settings {
@@ -38,10 +38,10 @@ index f44a371..6f53ac6 100644
      }
  }
 diff --git a/src/ui/settings.rs b/src/ui/settings.rs
-index 7ca18b3..75c2990 100644
+index aacdeb9..724f28b 100644
 --- a/src/ui/settings.rs
 +++ b/src/ui/settings.rs
-@@ -590,6 +590,12 @@ fn sections(app: &App) -> Vec<Section> {
+@@ -588,6 +588,12 @@ fn sections(app: &App) -> Vec<Section> {
          "",
          |settings| &mut settings.send_typing,
      );
@@ -52,5 +52,5 @@ index 7ca18b3..75c2990 100644
 +        |settings| &mut settings.ghost_mode,
 +    );
      app_lock_rows(app, &mut privacy);
-     // The account values live on the phone: they are shown once fetched and
-     // edited only while connected with a fresh snapshot.
+     privacy.row(
+         translated(locale, "Blocked contacts"),

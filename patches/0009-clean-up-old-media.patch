@@ -1,22 +1,22 @@
 diff --git a/src/app.rs b/src/app.rs
-index 23b3bf3..3d1e166 100644
+index e4f8de8..3acd4da 100644
 --- a/src/app.rs
 +++ b/src/app.rs
-@@ -9056,6 +9056,8 @@ impl App {
+@@ -10428,6 +10428,8 @@ impl App {
              self.window_focused = false;
          }
          self.report_presence();
 +        // Patched build: the backends read this before cleaning up media.
 +        crate::media_cleanup::set_enabled(self.settings.clean_old_media);
          self.handle_power();
+         self.track_focus(ctx, Instant::now());
          self.handle_tray();
-         #[cfg(target_os = "macos")]
 diff --git a/src/backend/worker.rs b/src/backend/worker.rs
-index 9b15737..f5b0b2a 100644
+index e30d7a3..3305632 100644
 --- a/src/backend/worker.rs
 +++ b/src/backend/worker.rs
-@@ -906,6 +906,12 @@ pub async fn run(
-                         worker.send_text(item.chat, item.text, None, item.mentions);
+@@ -1221,6 +1221,12 @@ pub async fn run(
+                         worker.send_text(item.chat, item.text, None, item.mentions, None);
                      }
                  }
 +                // Patched build: once a day, clean up media downloaded more
@@ -28,7 +28,7 @@ index 9b15737..f5b0b2a 100644
                  worker.reveal_unconfirmed_after_grace();
                  worker.settle_presence();
                  worker.refresh_legacy_preferences();
-@@ -2134,8 +2140,21 @@ impl Worker {
+@@ -2560,8 +2566,21 @@ impl Worker {
      fn measure_storage(&mut self, token: u64, clear: bool) {
          let dir = self.dirs.media_cache_dir();
          let commands = self.commands.clone();
@@ -52,10 +52,10 @@ index 9b15737..f5b0b2a 100644
              }
              let stats = match measure_media(&dir) {
 diff --git a/src/lib.rs b/src/lib.rs
-index c669eae..d401b3b 100644
+index 0d65ad6..65f89b4 100644
 --- a/src/lib.rs
 +++ b/src/lib.rs
-@@ -32,6 +32,7 @@ pub mod kept_revokes;
+@@ -35,6 +35,7 @@ pub mod lottie;
  #[cfg(target_os = "macos")]
  pub mod macos;
  pub mod markup;
@@ -200,7 +200,7 @@ index 0000000..5af1026
 +    failed.map_or(Ok(()), Err)
 +}
 diff --git a/src/settings.rs b/src/settings.rs
-index 6f53ac6..c1d69e0 100644
+index 2399077..23dc658 100644
 --- a/src/settings.rs
 +++ b/src/settings.rs
 @@ -601,6 +601,8 @@ pub struct Settings {
@@ -221,10 +221,10 @@ index 6f53ac6..c1d69e0 100644
      }
  }
 diff --git a/src/ui/settings.rs b/src/ui/settings.rs
-index 75c2990..27953a0 100644
+index 724f28b..d24373a 100644
 --- a/src/ui/settings.rs
 +++ b/src/ui/settings.rs
-@@ -858,6 +858,15 @@ fn sections(app: &App) -> Vec<Section> {
+@@ -873,6 +873,15 @@ fn sections(app: &App) -> Vec<Section> {
          ],
          storage_usage,
      );

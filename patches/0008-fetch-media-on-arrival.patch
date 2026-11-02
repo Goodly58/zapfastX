@@ -1,8 +1,8 @@
 diff --git a/src/backend/worker.rs b/src/backend/worker.rs
-index a019d84..9b15737 100644
+index 2f183c5..e30d7a3 100644
 --- a/src/backend/worker.rs
 +++ b/src/backend/worker.rs
-@@ -5050,6 +5050,11 @@ impl Worker {
+@@ -5996,6 +5996,11 @@ impl Worker {
              log::warn!("could not store a message: {error}");
              return;
          }
@@ -13,7 +13,7 @@ index a019d84..9b15737 100644
 +        }
          // Only a stored message can be moved to the server's time.
          if message.from_me && message.status == Delivery::Pending {
-             self.awaiting_ack
+             self.awaiting_ack.insert(
 diff --git a/src/kept_revokes.rs b/src/kept_revokes.rs
 index 9be23bf..c37a9ae 100644
 --- a/src/kept_revokes.rs

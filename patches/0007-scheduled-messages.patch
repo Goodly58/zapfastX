@@ -1,8 +1,8 @@
 diff --git a/src/app.rs b/src/app.rs
-index f193637..23b3bf3 100644
+index 7b26faa..e4f8de8 100644
 --- a/src/app.rs
 +++ b/src/app.rs
-@@ -5648,6 +5648,28 @@ impl App {
+@@ -6655,6 +6655,28 @@ impl App {
          self.follow_outgoing();
      }
  
@@ -32,12 +32,12 @@ index f193637..23b3bf3 100644
      pub(crate) fn composer_mentions(&self) -> Vec<ComposerMention> {
          self.composer_mentions.clone()
 diff --git a/src/backend.rs b/src/backend.rs
-index 4df13be..edafec5 100644
+index 9d0346b..aeb979c 100644
 --- a/src/backend.rs
 +++ b/src/backend.rs
-@@ -168,6 +168,10 @@ pub enum Command {
-         quoting: Option<crate::model::ReplyTarget>,
-         mentions: Vec<String>,
+@@ -205,6 +205,10 @@ pub enum Command {
+     FetchLinkPreview {
+         url: String,
      },
 +    /// Patched build: queues a text to send later.
 +    ScheduleText(crate::scheduled::Scheduled),
@@ -47,44 +47,44 @@ index 4df13be..edafec5 100644
          chat: ChatId,
          latitude: f64,
 diff --git a/src/backend/worker.rs b/src/backend/worker.rs
-index 6f0d4c5..a019d84 100644
+index fbf8c16..2f183c5 100644
 --- a/src/backend/worker.rs
 +++ b/src/backend/worker.rs
-@@ -820,6 +820,7 @@ pub async fn run(
+@@ -1086,6 +1086,7 @@ pub async fn run(
      worker.load_state();
      crate::kept_revokes::load(&worker.archive);
      crate::kept_edits::load(&worker.archive);
 +    crate::scheduled::load(&worker.archive);
      worker.backfill();
+     worker.backfill_lottie_stickers();
      worker.backfill_media_albums();
-     worker.backfill_video_notes();
-@@ -899,6 +900,12 @@ pub async fn run(
+@@ -1214,6 +1215,12 @@ pub async fn run(
              }
              _ = tick.tick() => {
                  worker.watch_link();
 +                // Patched build: send the scheduled messages that came due.
 +                if matches!(worker.status, LinkStatus::Connected) {
 +                    for item in crate::scheduled::take_due(&worker.archive, crate::util::now()) {
-+                        worker.send_text(item.chat, item.text, None, item.mentions);
++                        worker.send_text(item.chat, item.text, None, item.mentions, None);
 +                    }
 +                }
                  worker.reveal_unconfirmed_after_grace();
                  worker.settle_presence();
                  worker.refresh_legacy_preferences();
-@@ -6259,6 +6266,8 @@ impl Worker {
-                 quoting,
-                 mentions,
-             } => self.send_text(chat, text, quoting, mentions),
+@@ -7280,6 +7287,8 @@ impl Worker {
+                 preview,
+             } => self.send_text(chat, text, quoting, mentions, preview),
+             Command::FetchLinkPreview { url } => self.fetch_link_preview(url),
 +            Command::ScheduleText(item) => crate::scheduled::add(&self.archive, item),
 +            Command::CancelScheduled(id) => crate::scheduled::cancel(&self.archive, id),
              Command::SendLocation {
                  chat,
                  latitude,
 diff --git a/src/lib.rs b/src/lib.rs
-index 20adf1d..c669eae 100644
+index fb94370..0d65ad6 100644
 --- a/src/lib.rs
 +++ b/src/lib.rs
-@@ -45,6 +45,7 @@ pub mod privacy;
+@@ -48,6 +48,7 @@ pub mod privacy;
  pub mod proxy;
  pub mod qr;
  pub mod safety;
@@ -307,10 +307,10 @@ index 0000000..be3f38d
 +    }
 +}
 diff --git a/src/ui/conversation.rs b/src/ui/conversation.rs
-index 7086ebe..c69af75 100644
+index 24557cd..1ba637d 100644
 --- a/src/ui/conversation.rs
 +++ b/src/ui/conversation.rs
-@@ -1460,6 +1460,7 @@ fn composer(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
+@@ -1606,6 +1606,7 @@ fn composer(app: &mut App, ui: &mut egui::Ui, chat: &Chat, review_send: Option<b
              {
                  unsent_voice_strip(app, ui, samples);
              }
@@ -318,7 +318,7 @@ index 7086ebe..c69af75 100644
              if app.editing.is_some() {
                  edit_strip(app, ui);
              } else if let Some(reply_id) = app.reply_to.clone() {
-@@ -1873,12 +1874,19 @@ fn composer(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
+@@ -2091,12 +2092,19 @@ fn composer(app: &mut App, ui: &mut egui::Ui, chat: &Chat, review_send: Option<b
                      } else {
                          Icon::Send
                      };
@@ -340,10 +340,10 @@ index 7086ebe..c69af75 100644
 +                            .show(|ui| schedule_menu(app, ui, &chat.id));
 +                    }
                  });
+                 }
              },
-                     );
-@@ -2176,6 +2184,97 @@ fn unsent_voice_strip(app: &mut App, ui: &mut egui::Ui, samples: usize) {
-     strip_gap(ui);
+@@ -2471,6 +2479,97 @@ fn upload_strips(app: &mut App, ui: &mut egui::Ui, chat: &str) {
+     }
  }
  
 +/// Patched build: the messages waiting to be sent to this chat, soonest

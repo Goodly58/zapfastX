@@ -1,8 +1,8 @@
 diff --git a/src/app.rs b/src/app.rs
-index 52e1cad..877b52b 100644
+index 31879c3..695f0d6 100644
 --- a/src/app.rs
 +++ b/src/app.rs
-@@ -7955,6 +7955,10 @@ impl App {
+@@ -9186,6 +9186,10 @@ impl App {
                  });
              }
              Action::ToggleSidebar => self.sidebar_visible = !self.sidebar_visible,
@@ -14,10 +14,10 @@ index 52e1cad..877b52b 100644
                  if self.locked_folder {
                      self.close_locked_folder();
 diff --git a/src/model.rs b/src/model.rs
-index 3bc1b56..23ba896 100644
+index 7a20199..71eba79 100644
 --- a/src/model.rs
 +++ b/src/model.rs
-@@ -2915,6 +2915,7 @@ pub enum Action {
+@@ -3188,6 +3188,7 @@ pub enum Action {
      ShowDialog(Dialog),
      CloseDialog,
      ToggleSidebar,
@@ -26,7 +26,7 @@ index 3bc1b56..23ba896 100644
      /// Picks the chip the Calls page's history shows.
      SetCallFilter(CallFilter),
 diff --git a/src/settings.rs b/src/settings.rs
-index ff7306a..f44a371 100644
+index cc60f9e..2bcbb12 100644
 --- a/src/settings.rs
 +++ b/src/settings.rs
 @@ -404,6 +404,57 @@ pub enum NotificationSound {
@@ -104,7 +104,7 @@ index ff7306a..f44a371 100644
          }
      }
  }
-@@ -1182,6 +1236,27 @@ mod tests {
+@@ -1216,6 +1270,27 @@ mod tests {
          assert!(!merged(r#"{"pause_other_media":false}"#));
      }
  
@@ -133,10 +133,10 @@ index ff7306a..f44a371 100644
      fn damaged_theme_cache_does_not_discard_other_settings() {
          let settings: Settings = serde_json::from_str(r#"{"custom_theme":"mine.json","custom_theme_cache":{"damaged":true},"enter_sends":false}"#).unwrap();
 diff --git a/src/ui/chats.rs b/src/ui/chats.rs
-index aec3bb0..be70dbb 100644
+index c66b359..accece2 100644
 --- a/src/ui/chats.rs
 +++ b/src/ui/chats.rs
-@@ -1259,6 +1259,18 @@ fn hit_row(app: &mut App, ui: &mut egui::Ui, hit: &Message) {
+@@ -1306,6 +1306,18 @@ fn hit_row(app: &mut App, ui: &mut egui::Ui, hit: &Message) {
          Sense::click(),
      );
      theme::reveal_focus(&response);
@@ -155,7 +155,7 @@ index aec3bb0..be70dbb 100644
      if ui.is_rect_visible(rect) {
          if response.hovered() {
              widgets::row_highlight(ui, &palette, rect, palette.surface_hover);
-@@ -1274,6 +1286,9 @@ fn hit_row(app: &mut App, ui: &mut egui::Ui, hit: &Message) {
+@@ -1321,6 +1333,9 @@ fn hit_row(app: &mut App, ui: &mut egui::Ui, hit: &Message) {
              &hit.chat,
              picture.as_deref(),
          );
@@ -165,7 +165,7 @@ index aec3bb0..be70dbb 100644
          let left = rect.left() + 76.0;
          let right = rect.right() - 14.0;
          let stamp_galley = ui.painter().layout_no_wrap(
-@@ -1290,9 +1305,18 @@ fn hit_row(app: &mut App, ui: &mut egui::Ui, hit: &Message) {
+@@ -1337,9 +1352,18 @@ fn hit_row(app: &mut App, ui: &mut egui::Ui, hit: &Message) {
          let name_width = (right - stamp_galley.size().x - 8.0 - left).max(0.0);
          let name = widgets::line(ui, &title, theme::medium(14.5), palette.text, name_width, 1);
          name.paint(ui, pos2(left, name_top), palette.text);
@@ -184,7 +184,7 @@ index aec3bb0..be70dbb 100644
          if hit.from_me {
              let who = widgets::line(
                  ui,
-@@ -1304,6 +1328,7 @@ fn hit_row(app: &mut App, ui: &mut egui::Ui, hit: &Message) {
+@@ -1351,6 +1375,7 @@ fn hit_row(app: &mut App, ui: &mut egui::Ui, hit: &Message) {
              );
              who.paint(ui, pos2(x, line_y), palette.dim);
              x += who.size().x;
@@ -192,7 +192,7 @@ index aec3bb0..be70dbb 100644
          } else if crate::model::ChatKind::from_id(&hit.chat) == crate::model::ChatKind::Group {
              let sender = app.display_name_or(&hit.sender, hit.sender_name.as_deref());
              let first = app.short_name(&hit.sender, &sender);
-@@ -1317,6 +1342,7 @@ fn hit_row(app: &mut App, ui: &mut egui::Ui, hit: &Message) {
+@@ -1364,6 +1389,7 @@ fn hit_row(app: &mut App, ui: &mut egui::Ui, hit: &Message) {
              );
              who.paint(ui, pos2(x, line_y), palette.dim);
              x += who.size().x;
@@ -200,7 +200,7 @@ index aec3bb0..be70dbb 100644
          }
          let words = widgets::line(
              ui,
-@@ -1327,6 +1353,13 @@ fn hit_row(app: &mut App, ui: &mut egui::Ui, hit: &Message) {
+@@ -1374,6 +1400,13 @@ fn hit_row(app: &mut App, ui: &mut egui::Ui, hit: &Message) {
              1,
          );
          words.paint(ui, pos2(x, line_y), palette.dim);
@@ -214,7 +214,7 @@ index aec3bb0..be70dbb 100644
      }
      let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
      if response.clicked() {
-@@ -1413,6 +1446,14 @@ fn person_row(
+@@ -1460,6 +1493,14 @@ fn person_row(
          Sense::click(),
      );
      theme::reveal_focus(&response);
@@ -229,7 +229,7 @@ index aec3bb0..be70dbb 100644
      if ui.is_rect_visible(rect) {
          if response.hovered() {
              widgets::row_highlight(ui, &palette, rect, palette.surface_hover);
-@@ -1421,6 +1462,9 @@ fn person_row(
+@@ -1468,6 +1509,9 @@ fn person_row(
              Rect::from_center_size(pos2(rect.left() + 38.0, rect.center().y), Vec2::splat(48.0));
          let picture = app.avatar(id);
          widgets::paint_avatar(ui, &palette, avatar_rect, name, id, picture.as_deref());
@@ -239,7 +239,7 @@ index aec3bb0..be70dbb 100644
          let left = rect.left() + 76.0;
          let name_line = widgets::line(
              ui,
-@@ -1431,6 +1475,14 @@ fn person_row(
+@@ -1478,6 +1522,14 @@ fn person_row(
              1,
          );
          name_line.paint(ui, pos2(left, rect.top() + 14.0), palette.text);
@@ -254,7 +254,7 @@ index aec3bb0..be70dbb 100644
          if let Some(detail) = detail {
              let phone_line = widgets::line(
                  ui,
-@@ -1441,6 +1493,14 @@ fn person_row(
+@@ -1488,6 +1540,14 @@ fn person_row(
                  1,
              );
              phone_line.paint(ui, pos2(left, rect.top() + 38.0), palette.dim);
@@ -269,7 +269,7 @@ index aec3bb0..be70dbb 100644
          }
      }
      response.on_hover_cursor(egui::CursorIcon::PointingHand)
-@@ -1464,6 +1524,19 @@ fn row(app: &mut App, ui: &mut egui::Ui, chat: &Chat) -> egui::Response {
+@@ -1511,6 +1571,19 @@ fn row(app: &mut App, ui: &mut egui::Ui, chat: &Chat) -> egui::Response {
          Sense::click(),
      );
      theme::reveal_focus(&response);
@@ -289,7 +289,7 @@ index aec3bb0..be70dbb 100644
      // The preview area and the whole last message, when the row cuts it short.
      let mut full_preview: Option<(Rect, String, String)> = None;
      response.widget_info(|| {
-@@ -1491,6 +1564,9 @@ fn row(app: &mut App, ui: &mut egui::Ui, chat: &Chat) -> egui::Response {
+@@ -1538,6 +1611,9 @@ fn row(app: &mut App, ui: &mut egui::Ui, chat: &Chat) -> egui::Response {
              &chat.id,
              picture.as_deref(),
          );
@@ -299,7 +299,7 @@ index aec3bb0..be70dbb 100644
          if chat.disappearing_timer().is_some() {
              widgets::paint_disappearing_badge(ui, &palette, avatar_rect);
          }
-@@ -1525,6 +1601,14 @@ fn row(app: &mut App, ui: &mut egui::Ui, chat: &Chat) -> egui::Response {
+@@ -1572,6 +1648,14 @@ fn row(app: &mut App, ui: &mut egui::Ui, chat: &Chat) -> egui::Response {
          };
          let name = widgets::line(ui, &title, name_font, palette.text, name_width, 1);
          name.paint(ui, pos2(left, name_top), palette.text);
@@ -314,7 +314,7 @@ index aec3bb0..be70dbb 100644
  
          // Leave room for badges beside the latest-message preview.
          let mut badge_right = right;
-@@ -1561,6 +1645,7 @@ fn row(app: &mut App, ui: &mut egui::Ui, chat: &Chat) -> egui::Response {
+@@ -1608,6 +1692,7 @@ fn row(app: &mut App, ui: &mut egui::Ui, chat: &Chat) -> egui::Response {
              badge_right -= 20.0;
          }
          let mut x = left;
@@ -322,7 +322,7 @@ index aec3bb0..be70dbb 100644
          let typing = app.typing_in(&chat.id);
          let preview_color = if unread && !muted {
              palette.secondary
-@@ -1595,6 +1680,7 @@ fn row(app: &mut App, ui: &mut egui::Ui, chat: &Chat) -> egui::Response {
+@@ -1648,6 +1733,7 @@ fn row(app: &mut App, ui: &mut egui::Ui, chat: &Chat) -> egui::Response {
              let width = label.size().x;
              label.paint(ui, pos2(x, line_y), palette.accent);
              x += width;
@@ -330,7 +330,7 @@ index aec3bb0..be70dbb 100644
              widgets::line(
                  ui,
                  &draft,
-@@ -1620,6 +1706,7 @@ fn row(app: &mut App, ui: &mut egui::Ui, chat: &Chat) -> egui::Response {
+@@ -1673,6 +1759,7 @@ fn row(app: &mut App, ui: &mut egui::Ui, chat: &Chat) -> egui::Response {
                      ),
                  );
                  x += 20.0;
@@ -338,7 +338,7 @@ index aec3bb0..be70dbb 100644
              } else if chat.is_group() {
                  let sender = app.display_name_or(&last.sender, last.sender_name.as_deref());
                  let first = app.short_name(&last.sender, &sender);
-@@ -1635,6 +1722,7 @@ fn row(app: &mut App, ui: &mut egui::Ui, chat: &Chat) -> egui::Response {
+@@ -1688,6 +1775,7 @@ fn row(app: &mut App, ui: &mut egui::Ui, chat: &Chat) -> egui::Response {
                  let width = sender.size().x;
                  sender.paint(ui, pos2(x, line_y), preview_color);
                  x += width;
@@ -346,7 +346,7 @@ index aec3bb0..be70dbb 100644
              }
              let words = widgets::line(
                  ui,
-@@ -1661,6 +1749,16 @@ fn row(app: &mut App, ui: &mut egui::Ui, chat: &Chat) -> egui::Response {
+@@ -1714,6 +1802,16 @@ fn row(app: &mut App, ui: &mut egui::Ui, chat: &Chat) -> egui::Response {
              widgets::line(ui, "", theme::regular(13.0), preview_color, 1.0, 1)
          };
          preview.paint(ui, pos2(x, line_y), preview_color);
@@ -363,7 +363,7 @@ index aec3bb0..be70dbb 100644
      }
      let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
      if let Some((area, prefix, full)) = full_preview {
-@@ -1957,6 +2055,14 @@ fn compact_row(app: &mut App, ui: &mut egui::Ui, chat: &Chat) -> egui::Response
+@@ -2012,6 +2110,14 @@ fn compact_row(app: &mut App, ui: &mut egui::Ui, chat: &Chat) -> egui::Response
          ui.allocate_exact_size(vec2(ui.available_width(), COMPACT_CELL), Sense::click());
      // A short window leaves the rail's avatars little more than one row.
      theme::reveal_focus_in(ui, &response);
@@ -378,7 +378,7 @@ index aec3bb0..be70dbb 100644
      response.widget_info(|| {
          egui::WidgetInfo::selected(
              egui::WidgetType::SelectableLabel,
-@@ -1983,6 +2089,9 @@ fn compact_row(app: &mut App, ui: &mut egui::Ui, chat: &Chat) -> egui::Response
+@@ -2038,6 +2144,9 @@ fn compact_row(app: &mut App, ui: &mut egui::Ui, chat: &Chat) -> egui::Response
              &chat.id,
              picture.as_deref(),
          );
@@ -388,7 +388,7 @@ index aec3bb0..be70dbb 100644
          if chat.disappearing_timer().is_some() {
              widgets::paint_disappearing_badge(ui, &palette, avatar_rect);
          }
-@@ -2013,9 +2122,10 @@ fn compact_row(app: &mut App, ui: &mut egui::Ui, chat: &Chat) -> egui::Response
+@@ -2068,9 +2177,10 @@ fn compact_row(app: &mut App, ui: &mut egui::Ui, chat: &Chat) -> egui::Response
      }
      ui.ctx()
          .data_mut(|data| data.insert_temp(compact_chat_id(&chat.id), response.rect));
@@ -403,18 +403,18 @@ index aec3bb0..be70dbb 100644
          app.actions.push(Action::OpenChat(chat.id.clone()));
      }
 diff --git a/src/ui/conversation.rs b/src/ui/conversation.rs
-index 527d65a..c731dd1 100644
+index f72e004..1f55b3d 100644
 --- a/src/ui/conversation.rs
 +++ b/src/ui/conversation.rs
 @@ -17,6 +17,7 @@ use crate::model::{
-     Action, Chat, ChatId, Content, Delivery, Dialog, LinkPreview, Media, MediaState, Message,
-     PickerTab, Scroll,
+     Action, Chat, ChatActivity, ChatId, Content, Delivery, Dialog, LinkPreview, Media, MediaState,
+     Message, PickerTab, Scroll,
  };
 +use crate::settings::{ScreenPrivacy, ScreenPrivacyWhat};
  use crate::theme::{self, Icon, Palette};
  use crate::wallpaper;
  
-@@ -455,6 +456,7 @@ fn header(app: &mut App, ui: &mut egui::Ui, chat: &Chat) -> Rect {
+@@ -499,6 +500,7 @@ fn header(app: &mut App, ui: &mut egui::Ui, chat: &Chat) -> Rect {
                  let mut text = Rect::NOTHING;
                  let mut avatar = Rect::NOTHING;
                  // Treat the avatar, name, and subtitle as one info button.
@@ -422,7 +422,7 @@ index 527d65a..c731dd1 100644
                  let block = ui
                      .scope(|ui| {
                          // Fix the child height before centering its contents.
-@@ -481,6 +483,8 @@ fn header(app: &mut App, ui: &mut egui::Ui, chat: &Chat) -> Rect {
+@@ -525,6 +527,8 @@ fn header(app: &mut App, ui: &mut egui::Ui, chat: &Chat) -> Rect {
                                          avatar_response.rect,
                                      );
                                  }
@@ -431,7 +431,7 @@ index 527d65a..c731dd1 100644
                                  // Room for the name's glass pill to clear the avatar.
                                  ui.add_space(if palette.vibrant() { 14.0 } else { 4.0 });
                                  ui.vertical(|ui| {
-@@ -595,6 +599,25 @@ fn header(app: &mut App, ui: &mut egui::Ui, chat: &Chat) -> Rect {
+@@ -639,6 +643,25 @@ fn header(app: &mut App, ui: &mut egui::Ui, chat: &Chat) -> Rect {
                  if block.clicked() {
                      app.actions.push(Action::OpenInfo(chat.id.clone()));
                  }
@@ -457,7 +457,7 @@ index 527d65a..c731dd1 100644
                  // The item and the width that has to hold it are measured from
                  // the same localized label: a translation wider than the
                  // English one would otherwise be clipped.
-@@ -2221,6 +2244,23 @@ fn reply_strip(app: &mut App, ui: &mut egui::Ui, quoted: &Message) {
+@@ -2516,6 +2539,23 @@ fn reply_strip(app: &mut App, ui: &mut egui::Ui, quoted: &Message) {
      });
      ui.ctx()
          .data_mut(|data| data.insert_temp(reply_strip_id(), strip.response.rect));
@@ -481,7 +481,7 @@ index 527d65a..c731dd1 100644
      strip_gap(ui);
  }
  
-@@ -2268,6 +2308,7 @@ struct View<'a> {
+@@ -2656,6 +2696,7 @@ struct View<'a> {
      avatars: &'a HashMap<String, Option<PathBuf>>,
      contacts: &'a HashMap<String, crate::model::Contact>,
      now: i64,
@@ -489,7 +489,7 @@ index 527d65a..c731dd1 100644
      /// Animate media only while this window is active.
      animate: bool,
      /// The motion photo of this chat whose clip plays.
-@@ -2548,6 +2589,7 @@ fn messages(app: &mut App, ui: &mut egui::Ui, chat: &Chat, under: f32) {
+@@ -3117,6 +3158,7 @@ fn messages(app: &mut App, ui: &mut egui::Ui, chat: &Chat, under: f32) {
          avatars: &avatars,
          contacts: &app.contacts,
          now: crate::util::now(),
@@ -497,7 +497,7 @@ index 527d65a..c731dd1 100644
          animate: app.window_focused,
          motion_playing: app
              .motion_playing
-@@ -3566,7 +3608,12 @@ fn typing_bubble(ui: &mut egui::Ui, view: &View<'_>, typers: &[(String, String)]
+@@ -4488,7 +4530,12 @@ fn typing_bubble(ui: &mut egui::Ui, view: &View<'_>, typers: &[(String, String,
              let count = typers.len().min(3);
              let step = SENDER_AVATAR * 0.6;
              let width = SENDER_AVATAR + step * (count.saturating_sub(1)) as f32;
@@ -509,9 +509,9 @@ index 527d65a..c731dd1 100644
 +                response.hovered(),
 +            );
              if ui.is_rect_visible(rect) {
-                 for (index, (id, name)) in typers.iter().take(count).enumerate() {
+                 for (index, (id, name, _)) in typers.iter().take(count).enumerate() {
                      let avatar = Rect::from_min_size(
-@@ -3589,6 +3636,14 @@ fn typing_bubble(ui: &mut egui::Ui, view: &View<'_>, typers: &[(String, String)]
+@@ -4511,6 +4558,14 @@ fn typing_bubble(ui: &mut egui::Ui, view: &View<'_>, typers: &[(String, String,
                          id,
                          view.avatars.get(id).and_then(|picture| picture.as_deref()),
                      );
@@ -526,7 +526,7 @@ index 527d65a..c731dd1 100644
                  }
              }
              ui.add_space(2.0);
-@@ -3919,6 +3974,9 @@ fn bubble(
+@@ -4946,6 +5001,9 @@ fn bubble(
                      };
                      let avatar = ui.interact(rect, id.with("avatar"), Sense::CLICK);
                      theme::focus_outline(ui, avatar.id, rect, SENDER_AVATAR / 2.0);
@@ -536,7 +536,7 @@ index 527d65a..c731dd1 100644
                      if avatar
                          .on_hover_cursor(egui::CursorIcon::PointingHand)
                          .clicked()
-@@ -3937,6 +3995,14 @@ fn bubble(
+@@ -4964,6 +5022,14 @@ fn bubble(
                                  .get(&message.sender)
                                  .and_then(|picture| picture.as_deref()),
                          );
@@ -551,7 +551,7 @@ index 527d65a..c731dd1 100644
                      }
                  });
              } else {
-@@ -3968,9 +4034,25 @@ fn bubble(
+@@ -4995,9 +5061,25 @@ fn bubble(
              }
          },
      );
@@ -577,7 +577,7 @@ index 527d65a..c731dd1 100644
  /// Clamps message-selection drags to the view while the pointer is outside it.
  /// This keeps a row under the pointer during edge scrolling. The input hook
  /// adjusts positions before egui processes them, using the previous frame's
-@@ -4500,6 +4582,12 @@ fn bubble_frame(
+@@ -5595,6 +5677,12 @@ fn bubble_frame(
                      theme::semibold(13.0),
                      palette.sender(crate::util::hue(&message.sender)),
                  );
@@ -590,7 +590,7 @@ index 527d65a..c731dd1 100644
                  let response = ui
                      .interact(
                          response.rect,
-@@ -4946,7 +5034,20 @@ fn quote_block(
+@@ -6213,7 +6301,20 @@ fn quote_block(
                  |ui| {
                      ui.set_width(inner_width);
                      ui.spacing_mut().item_spacing.y = 1.0;
@@ -612,7 +612,7 @@ index 527d65a..c731dd1 100644
                      widgets::rich_text(ui, &summary, theme::regular(12.5), colours.text);
                  },
              );
-@@ -5765,6 +5866,7 @@ pub(crate) fn list_menu(
+@@ -7110,6 +7211,7 @@ pub(crate) fn list_menu(
          avatars: &avatars,
          contacts: &app.contacts,
          now: crate::util::now(),
@@ -620,7 +620,7 @@ index 527d65a..c731dd1 100644
          // A row drawn outside the conversation holds still.
          animate: false,
          player: &app.player,
-@@ -10763,6 +10865,7 @@ mod tests {
+@@ -12831,6 +12933,7 @@ mod tests {
              avatars: &avatars,
              contacts: &app.contacts,
              now: 0,
@@ -629,10 +629,10 @@ index 527d65a..c731dd1 100644
              player: &app.player,
              voice_speed: app.settings.voice_speed,
 diff --git a/src/ui/keys.rs b/src/ui/keys.rs
-index 7efb532..c44b38f 100644
+index 55776cd..35fa696 100644
 --- a/src/ui/keys.rs
 +++ b/src/ui/keys.rs
-@@ -78,6 +78,11 @@ pub fn handle(app: &mut App, ctx: &egui::Context) {
+@@ -106,6 +106,11 @@ pub fn handle(app: &mut App, ctx: &egui::Context) {
              key(Modifiers::COMMAND, Key::E, archive);
          }
          key(Modifiers::COMMAND, Key::B, Action::ToggleSidebar);
@@ -644,7 +644,7 @@ index 7efb532..c44b38f 100644
          key(Modifiers::COMMAND, Key::Comma, Action::ToggleSettings);
          key(Modifiers::COMMAND, Key::Q, Action::Quit);
          key(Modifiers::COMMAND, Key::W, Action::CloseWindow);
-@@ -641,6 +646,7 @@ pub const SHORTCUTS: &[(&str, &str)] = &[
+@@ -1096,6 +1101,7 @@ pub const SHORTCUTS: &[(&str, &str)] = &[
      ("Ctrl+N", "New chat or message yourself"),
      ("Ctrl+E", "Archive or unarchive the open chat"),
      ("Ctrl+Shift+A", "Switch to the next linked number"),
@@ -703,10 +703,10 @@ index 294932f..ce2b593 100644
                                  ui,
                                  crate::util::moment_stamp(app.locale, voter.timestamp),
 diff --git a/src/ui/settings.rs b/src/ui/settings.rs
-index 0460646..7ca18b3 100644
+index f0ac9d5..aacdeb9 100644
 --- a/src/ui/settings.rs
 +++ b/src/ui/settings.rs
-@@ -650,6 +650,11 @@ fn sections(app: &App) -> Vec<Section> {
+@@ -665,6 +665,11 @@ fn sections(app: &App) -> Vec<Section> {
          });
      }
  
@@ -718,7 +718,7 @@ index 0460646..7ca18b3 100644
      let mut system = Section::new(translated(locale, "System"));
      system.toggle(
          translated(locale, "Keep running when the window closes"),
-@@ -881,6 +886,7 @@ fn sections(app: &App) -> Vec<Section> {
+@@ -896,6 +901,7 @@ fn sections(app: &App) -> Vec<Section> {
          chats,
          notifications,
          privacy,
@@ -726,7 +726,7 @@ index 0460646..7ca18b3 100644
          system,
          account_section,
          files,
-@@ -888,6 +894,46 @@ fn sections(app: &App) -> Vec<Section> {
+@@ -903,6 +909,46 @@ fn sections(app: &App) -> Vec<Section> {
      ]
  }
  
@@ -774,7 +774,7 @@ index 0460646..7ca18b3 100644
  /// that sets, changes, or removes the password.
  fn app_lock_rows(app: &App, privacy: &mut Section) {
 diff --git a/src/ui/widgets.rs b/src/ui/widgets.rs
-index 3e67d0e..921f502 100644
+index 4bc3ce7..a7b87de 100644
 --- a/src/ui/widgets.rs
 +++ b/src/ui/widgets.rs
 @@ -42,6 +42,12 @@ impl Line {

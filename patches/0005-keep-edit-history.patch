@@ -1,16 +1,16 @@
 diff --git a/src/backend/worker.rs b/src/backend/worker.rs
-index a84cd4e..6f0d4c5 100644
+index a018575..fbf8c16 100644
 --- a/src/backend/worker.rs
 +++ b/src/backend/worker.rs
-@@ -819,6 +819,7 @@ pub async fn run(
+@@ -1085,6 +1085,7 @@ pub async fn run(
      };
      worker.load_state();
      crate::kept_revokes::load(&worker.archive);
 +    crate::kept_edits::load(&worker.archive);
      worker.backfill();
+     worker.backfill_lottie_stickers();
      worker.backfill_media_albums();
-     worker.backfill_video_notes();
-@@ -4363,6 +4364,12 @@ impl Worker {
+@@ -5218,6 +5219,12 @@ impl Worker {
                          let existing = self.archive.message(&chat, &target).ok().flatten();
                          if let Some(existing) = &existing {
                              content.keep_local_paths(&existing.content);
@@ -116,22 +116,22 @@ index 0000000..2b6376a
 +        .cloned()
 +}
 diff --git a/src/lib.rs b/src/lib.rs
-index 3a4746a..20adf1d 100644
+index 9f74d4b..fb94370 100644
 --- a/src/lib.rs
 +++ b/src/lib.rs
-@@ -27,6 +27,7 @@ pub mod group_admin;
+@@ -29,6 +29,7 @@ pub mod group_admin;
  pub mod i18n;
  pub mod image_cache;
  pub mod image_preview;
 +pub mod kept_edits;
  pub mod kept_revokes;
+ pub mod lottie;
  #[cfg(target_os = "macos")]
- pub mod macos;
 diff --git a/src/ui/conversation.rs b/src/ui/conversation.rs
-index ecff592..7086ebe 100644
+index 1f55b3d..24557cd 100644
 --- a/src/ui/conversation.rs
 +++ b/src/ui/conversation.rs
-@@ -5313,6 +5313,25 @@ fn footer_note(message: &Message) -> Option<&'static str> {
+@@ -6573,6 +6573,25 @@ fn footer_note(message: &Message) -> Option<&'static str> {
      }
  }
  
@@ -157,7 +157,7 @@ index ecff592..7086ebe 100644
  /// Width of the message footer, including the room its marks take.
  fn footer_width(ui: &egui::Ui, message: &Message, starred: bool, pinned: bool) -> f32 {
      let font = theme::regular(11.0);
-@@ -5635,11 +5654,23 @@ fn footer(
+@@ -6895,11 +6914,23 @@ fn footer(
      }
      if let Some(edited) = edited {
          x -= edited.size().x + 4.0;

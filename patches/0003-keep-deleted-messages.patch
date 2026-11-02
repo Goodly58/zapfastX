@@ -1,16 +1,16 @@
 diff --git a/src/backend/worker.rs b/src/backend/worker.rs
-index e5b16c3..a84cd4e 100644
+index 68e6530..a018575 100644
 --- a/src/backend/worker.rs
 +++ b/src/backend/worker.rs
-@@ -818,6 +818,7 @@ pub async fn run(
+@@ -1084,6 +1084,7 @@ pub async fn run(
          forward_queue: None,
      };
      worker.load_state();
 +    crate::kept_revokes::load(&worker.archive);
      worker.backfill();
+     worker.backfill_lottie_stickers();
      worker.backfill_media_albums();
-     worker.backfill_video_notes();
-@@ -4338,7 +4339,11 @@ impl Worker {
+@@ -5193,7 +5194,11 @@ impl Worker {
                      // A late answer to an edit sent from here must not
                      // replace what the phone did since.
                      self.edits.remove(&(chat.clone(), target.clone()));
@@ -23,7 +23,7 @@ index e5b16c3..a84cd4e 100644
                          self.archive
                              .set_content(&chat, &target, &Content::Revoked, false)
                      {
-@@ -5662,13 +5667,13 @@ impl Worker {
+@@ -6652,13 +6657,13 @@ impl Worker {
                  );
              }
              for revoked in chat.revoked {
@@ -119,22 +119,22 @@ index 0000000..9be23bf
 +        .contains(&line(chat, id))
 +}
 diff --git a/src/lib.rs b/src/lib.rs
-index d73ecda..3a4746a 100644
+index d388da9..9f74d4b 100644
 --- a/src/lib.rs
 +++ b/src/lib.rs
-@@ -27,6 +27,7 @@ pub mod group_admin;
+@@ -29,6 +29,7 @@ pub mod group_admin;
  pub mod i18n;
  pub mod image_cache;
  pub mod image_preview;
 +pub mod kept_revokes;
+ pub mod lottie;
  #[cfg(target_os = "macos")]
  pub mod macos;
- pub mod markup;
 diff --git a/src/ui/conversation.rs b/src/ui/conversation.rs
-index 165ce01..527d65a 100644
+index 3deca29..f72e004 100644
 --- a/src/ui/conversation.rs
 +++ b/src/ui/conversation.rs
-@@ -5200,13 +5200,25 @@ fn clock_width(ui: &egui::Ui, message: &Message) -> f32 {
+@@ -6460,13 +6460,25 @@ fn clock_width(ui: &egui::Ui, message: &Message) -> f32 {
          .x
  }
  
@@ -162,7 +162,7 @@ index 165ce01..527d65a 100644
              .size()
              .x
              + 4.0
-@@ -5454,9 +5466,14 @@ fn footer(
+@@ -6714,9 +6726,14 @@ fn footer(
          font.clone(),
          palette.secondary,
      );
