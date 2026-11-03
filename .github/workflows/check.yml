@@ -64,6 +64,9 @@ jobs:
         with:
           workspaces: zapfast
           key: ${{ matrix.upstream }}
+      - name: Pin whatsapp-rust to the offline backlog fix
+        working-directory: zapfast
+        run: bash ../fork/scripts/pin-whatsapp-rust.sh
       - name: cargo check
         working-directory: zapfast
         run: cargo check --locked --message-format short

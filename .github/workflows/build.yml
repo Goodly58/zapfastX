@@ -115,6 +115,9 @@ jobs:
           targets: ${{ matrix.target }}
       # Upstream pins its toolchain; add the target to the pinned one.
       - run: rustup target add $env:TARGET
+      - name: Pin whatsapp-rust to the offline backlog fix
+        shell: bash
+        run: bash ../fork/scripts/pin-whatsapp-rust.sh
       - run: cargo build --locked --release --target $env:TARGET
 
       - name: Package
@@ -213,6 +216,8 @@ jobs:
         with:
           targets: aarch64-apple-darwin,x86_64-apple-darwin
       - run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+      - name: Pin whatsapp-rust to the offline backlog fix
+        run: bash ../fork/scripts/pin-whatsapp-rust.sh
       - name: Build both architectures
         run: |
           cargo build --locked --release --target aarch64-apple-darwin

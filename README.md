@@ -8,6 +8,7 @@
 - **Screen privacy.** Covers chats, messages, media, names and avatars until hovered (Ctrl+Shift+H, off by default). By [paulo1403](https://github.com/paulo1403) ([crmne/zapfast#451](https://github.com/crmne/zapfast/pull/451)), via [ZapFaster](https://github.com/eternalwaitt/zap-faster).
 - **Ghost mode.** Never shows you as online (Settings → Privacy, off by default).
 - **Scheduled messages.** Right-click Send to send later. Waiting messages sit above the composer until they go.
+- **Connects after a long sleep.** Uses the WhatsApp library's fix for a backlog of missed messages that kept ZapFast from connecting ([oxidezap/whatsapp-rust#1813](https://github.com/oxidezap/whatsapp-rust/issues/1813)), until upstream ZapFast picks it up.
 - **Updates come from this repository**, so they keep these changes.
 
 <p align="center">
@@ -28,7 +29,7 @@
 
 **Also:** optional clean-up of media downloaded more than 3 months ago (Settings → Files, off by default). Media from deleted messages is always kept, by Clear too.
 
-Everything else is upstream ZapFast. The changes are in [`patches/`](patches).
+Everything else is upstream ZapFast. The changes are in [`patches/`](patches), and the library update in [`scripts/pin-whatsapp-rust.sh`](scripts/pin-whatsapp-rust.sh).
 
 **[Download the latest release](https://github.com/Goodly58/zapfastX/releases/latest)**: `.msi` for Windows (x64 or ARM64), `.dmg` for Mac. The Mac app is unsigned, so open it the first time from System Settings → Privacy & Security → **Open Anyway**.
 
