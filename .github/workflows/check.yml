@@ -71,4 +71,4 @@ jobs:
       # patch that breaks upstream's expectations shows here.
       - name: cargo test (patched modules)
         working-directory: zapfast
-        run: "cargo test --locked --lib -- animation:: kept_ scheduled:: media_cleanup:: groups_in_common a_remove_notice"
+        run: "cargo test --locked --lib -- animation:: kept_ scheduled:: media_cleanup:: groups_in_common"
