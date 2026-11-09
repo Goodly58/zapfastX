@@ -133,7 +133,7 @@ index cc60f9e..2bcbb12 100644
      fn damaged_theme_cache_does_not_discard_other_settings() {
          let settings: Settings = serde_json::from_str(r#"{"custom_theme":"mine.json","custom_theme_cache":{"damaged":true},"enter_sends":false}"#).unwrap();
 diff --git a/src/ui/chats.rs b/src/ui/chats.rs
-index c66b359..accece2 100644
+index c66b359..e921492 100644
 --- a/src/ui/chats.rs
 +++ b/src/ui/chats.rs
 @@ -1306,6 +1306,18 @@ fn hit_row(app: &mut App, ui: &mut egui::Ui, hit: &Message) {
@@ -214,25 +214,18 @@ index c66b359..accece2 100644
      }
      let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
      if response.clicked() {
-@@ -1460,6 +1493,14 @@ fn person_row(
-         Sense::click(),
-     );
-     theme::reveal_focus(&response);
-+    let hidden_avatar = app.settings.screen_privacy.hides(
-+        crate::settings::ScreenPrivacyWhat::Avatar,
-+        response.hovered(),
-+    );
-+    let hidden_name = app
-+        .settings
-+        .screen_privacy
-+        .hides(crate::settings::ScreenPrivacyWhat::Name, response.hovered());
-     if ui.is_rect_visible(rect) {
-         if response.hovered() {
-             widgets::row_highlight(ui, &palette, rect, palette.surface_hover);
-@@ -1468,6 +1509,9 @@ fn person_row(
+@@ -1468,6 +1501,17 @@ fn person_row(
              Rect::from_center_size(pos2(rect.left() + 38.0, rect.center().y), Vec2::splat(48.0));
          let picture = app.avatar(id);
          widgets::paint_avatar(ui, &palette, avatar_rect, name, id, picture.as_deref());
++        let hidden_avatar = app.settings.screen_privacy.hides(
++            crate::settings::ScreenPrivacyWhat::Avatar,
++            response.hovered(),
++        );
++        let hidden_name = app
++            .settings
++            .screen_privacy
++            .hides(crate::settings::ScreenPrivacyWhat::Name, response.hovered());
 +        if hidden_avatar {
 +            widgets::privacy_cover(ui, avatar_rect, palette.surface_hover, 24.0);
 +        }
@@ -403,7 +396,7 @@ index c66b359..accece2 100644
          app.actions.push(Action::OpenChat(chat.id.clone()));
      }
 diff --git a/src/ui/conversation.rs b/src/ui/conversation.rs
-index f72e004..1f55b3d 100644
+index 8e37de5..13ecd77 100644
 --- a/src/ui/conversation.rs
 +++ b/src/ui/conversation.rs
 @@ -17,6 +17,7 @@ use crate::model::{
@@ -457,7 +450,7 @@ index f72e004..1f55b3d 100644
                  // The item and the width that has to hold it are measured from
                  // the same localized label: a translation wider than the
                  // English one would otherwise be clipped.
-@@ -2516,6 +2539,23 @@ fn reply_strip(app: &mut App, ui: &mut egui::Ui, quoted: &Message) {
+@@ -2525,6 +2548,23 @@ fn reply_strip(app: &mut App, ui: &mut egui::Ui, quoted: &Message) {
      });
      ui.ctx()
          .data_mut(|data| data.insert_temp(reply_strip_id(), strip.response.rect));
@@ -481,7 +474,7 @@ index f72e004..1f55b3d 100644
      strip_gap(ui);
  }
  
-@@ -2656,6 +2696,7 @@ struct View<'a> {
+@@ -2665,6 +2705,7 @@ struct View<'a> {
      avatars: &'a HashMap<String, Option<PathBuf>>,
      contacts: &'a HashMap<String, crate::model::Contact>,
      now: i64,
@@ -489,7 +482,7 @@ index f72e004..1f55b3d 100644
      /// Animate media only while this window is active.
      animate: bool,
      /// The motion photo of this chat whose clip plays.
-@@ -3117,6 +3158,7 @@ fn messages(app: &mut App, ui: &mut egui::Ui, chat: &Chat, under: f32) {
+@@ -3126,6 +3167,7 @@ fn messages(app: &mut App, ui: &mut egui::Ui, chat: &Chat, under: f32) {
          avatars: &avatars,
          contacts: &app.contacts,
          now: crate::util::now(),
@@ -497,7 +490,7 @@ index f72e004..1f55b3d 100644
          animate: app.window_focused,
          motion_playing: app
              .motion_playing
-@@ -4488,7 +4530,12 @@ fn typing_bubble(ui: &mut egui::Ui, view: &View<'_>, typers: &[(String, String,
+@@ -4497,7 +4539,12 @@ fn typing_bubble(ui: &mut egui::Ui, view: &View<'_>, typers: &[(String, String,
              let count = typers.len().min(3);
              let step = SENDER_AVATAR * 0.6;
              let width = SENDER_AVATAR + step * (count.saturating_sub(1)) as f32;
@@ -511,7 +504,7 @@ index f72e004..1f55b3d 100644
              if ui.is_rect_visible(rect) {
                  for (index, (id, name, _)) in typers.iter().take(count).enumerate() {
                      let avatar = Rect::from_min_size(
-@@ -4511,6 +4558,14 @@ fn typing_bubble(ui: &mut egui::Ui, view: &View<'_>, typers: &[(String, String,
+@@ -4520,6 +4567,14 @@ fn typing_bubble(ui: &mut egui::Ui, view: &View<'_>, typers: &[(String, String,
                          id,
                          view.avatars.get(id).and_then(|picture| picture.as_deref()),
                      );
@@ -526,7 +519,7 @@ index f72e004..1f55b3d 100644
                  }
              }
              ui.add_space(2.0);
-@@ -4946,6 +5001,9 @@ fn bubble(
+@@ -4955,6 +5010,9 @@ fn bubble(
                      };
                      let avatar = ui.interact(rect, id.with("avatar"), Sense::CLICK);
                      theme::focus_outline(ui, avatar.id, rect, SENDER_AVATAR / 2.0);
@@ -536,7 +529,7 @@ index f72e004..1f55b3d 100644
                      if avatar
                          .on_hover_cursor(egui::CursorIcon::PointingHand)
                          .clicked()
-@@ -4964,6 +5022,14 @@ fn bubble(
+@@ -4973,6 +5031,14 @@ fn bubble(
                                  .get(&message.sender)
                                  .and_then(|picture| picture.as_deref()),
                          );
@@ -551,7 +544,7 @@ index f72e004..1f55b3d 100644
                      }
                  });
              } else {
-@@ -4995,9 +5061,25 @@ fn bubble(
+@@ -5004,9 +5070,25 @@ fn bubble(
              }
          },
      );
@@ -577,7 +570,7 @@ index f72e004..1f55b3d 100644
  /// Clamps message-selection drags to the view while the pointer is outside it.
  /// This keeps a row under the pointer during edge scrolling. The input hook
  /// adjusts positions before egui processes them, using the previous frame's
-@@ -5595,6 +5677,12 @@ fn bubble_frame(
+@@ -5604,6 +5686,12 @@ fn bubble_frame(
                      theme::semibold(13.0),
                      palette.sender(crate::util::hue(&message.sender)),
                  );
@@ -590,7 +583,7 @@ index f72e004..1f55b3d 100644
                  let response = ui
                      .interact(
                          response.rect,
-@@ -6213,7 +6301,20 @@ fn quote_block(
+@@ -6222,7 +6310,20 @@ fn quote_block(
                  |ui| {
                      ui.set_width(inner_width);
                      ui.spacing_mut().item_spacing.y = 1.0;
@@ -612,7 +605,7 @@ index f72e004..1f55b3d 100644
                      widgets::rich_text(ui, &summary, theme::regular(12.5), colours.text);
                  },
              );
-@@ -7110,6 +7211,7 @@ pub(crate) fn list_menu(
+@@ -7119,6 +7220,7 @@ pub(crate) fn list_menu(
          avatars: &avatars,
          contacts: &app.contacts,
          now: crate::util::now(),
@@ -620,7 +613,7 @@ index f72e004..1f55b3d 100644
          // A row drawn outside the conversation holds still.
          animate: false,
          player: &app.player,
-@@ -12831,6 +12933,7 @@ mod tests {
+@@ -12840,6 +12942,7 @@ mod tests {
              avatars: &avatars,
              contacts: &app.contacts,
              now: 0,
@@ -703,22 +696,20 @@ index 294932f..ce2b593 100644
                                  ui,
                                  crate::util::moment_stamp(app.locale, voter.timestamp),
 diff --git a/src/ui/settings.rs b/src/ui/settings.rs
-index f0ac9d5..aacdeb9 100644
+index f0ac9d5..be43925 100644
 --- a/src/ui/settings.rs
 +++ b/src/ui/settings.rs
-@@ -665,6 +665,11 @@ fn sections(app: &App) -> Vec<Section> {
-         });
-     }
+@@ -891,11 +891,17 @@ fn sections(app: &App) -> Vec<Section> {
+         |ui, app| about(app, ui),
+     );
  
 +    // Local screen privacy lives apart from account privacy: one hides the
 +    // window from onlookers, the other tells the phone what to share.
 +    let mut screen_privacy = Section::new(translated(locale, "Screen privacy"));
 +    screen_privacy_rows(locale, &mut screen_privacy);
 +
-     let mut system = Section::new(translated(locale, "System"));
-     system.toggle(
-         translated(locale, "Keep running when the window closes"),
-@@ -896,6 +901,7 @@ fn sections(app: &App) -> Vec<Section> {
+     vec![
+         appearance,
          chats,
          notifications,
          privacy,

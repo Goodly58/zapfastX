@@ -2,7 +2,7 @@ diff --git a/docs/_guide/using-zapfast.md b/docs/_guide/using-zapfast.md
 index 4d5bbd4..95231e7 100644
 --- a/docs/_guide/using-zapfast.md
 +++ b/docs/_guide/using-zapfast.md
-@@ -719,6 +719,11 @@ add someone, ZapFast names them after the group is created, and you can send
+@@ -719,5 +719,10 @@ add someone, ZapFast names them after the group is created, and you can send
  them the group's invite link from its details. **Back** steps back, unchecking everyone returns to the
  contact list, and Escape closes the dialog.
  
@@ -13,7 +13,6 @@ index 4d5bbd4..95231e7 100644
 +
  The search bar finds chats by name, number, or latest message; searches all
  messages stored on this computer; and finds contacts without an existing chat.
- Use `↑`/`↓` to select a matching chat and Enter to open it ready for typing.
 diff --git a/src/backend/worker.rs b/src/backend/worker.rs
 index 68e6530..429b45e 100644
 --- a/src/backend/worker.rs
