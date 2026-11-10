@@ -109,7 +109,7 @@ index 1abbb76..e9578e2 100644
  
  /// The content of a refused send.
 diff --git a/src/backend/worker.rs b/src/backend/worker.rs
-index fbf8c16..4a2048d 100644
+index fbf8c16..7ea95ce 100644
 --- a/src/backend/worker.rs
 +++ b/src/backend/worker.rs
 @@ -1086,6 +1086,7 @@ pub async fn run(
@@ -158,7 +158,7 @@ index fbf8c16..4a2048d 100644
              Command::SendLocation {
                  chat,
                  latitude,
-@@ -11375,6 +11393,181 @@ impl Worker {
+@@ -11375,6 +11393,195 @@ impl Worker {
          (self.send_turns.insert(chat.clone(), next), turn)
      }
  
@@ -267,8 +267,14 @@ index fbf8c16..4a2048d 100644
 +        }
 +        if !returned {
 +            // Only broken pictures: the text, if any, still goes back.
-+            let text = text.unwrap_or_default();
-+            self.refuse(item.chat, None, Unsent::Text(text), Refusal::NotScheduled);
++            match text {
++                Some(text) => {
++                    self.refuse(item.chat, None, Unsent::Text(text), Refusal::NotScheduled);
++                }
++                None => self.emit(Event::Error(
++                    "Not scheduled: ZapFast could not keep the pictures.".to_owned(),
++                )),
++            }
 +        }
 +    }
 +
@@ -279,10 +285,17 @@ index fbf8c16..4a2048d 100644
 +    fn scheduled_unsent(&self, item: &crate::scheduled::Scheduled, why: &str) {
 +        crate::scheduled::mark_sent(&self.dirs.state, item.id);
 +        log::warn!("scheduled message {} not sent: {why}", item.id);
-+        self.emit(Event::Error(format!(
-+            "A scheduled message was not sent: {why}. It was: {}",
-+            item.preview()
-+        )));
++        // A locked chat's words stay out of sight, as they do elsewhere, and
++        // so do any while the account cannot yet tell which chats are locked.
++        let locked = !self.privacy_ready
++            || matches!(self.archive.chat(&item.chat), Ok(Some(chat)) if chat.locked)
++            || self.archive.chat(&item.chat).is_err();
++        let message = if locked {
++            format!("A scheduled message was not sent: {why}.")
++        } else {
++            format!("A scheduled message was not sent: {why}. It was: {}", item.preview())
++        };
++        self.emit(Event::Error(message));
 +    }
 +
 +    /// Patched build: sends a scheduled message as the composer would have,
@@ -292,7 +305,8 @@ index fbf8c16..4a2048d 100644
 +    /// can shortly after connecting, the message waits; one the chat no
 +    /// longer takes, blocked or read-only, is reported instead.
 +    async fn send_scheduled(&mut self, item: crate::scheduled::Scheduled) {
-+        if !self.privacy_ready {
++        // Not ready to tell, or its chat cannot be read just now: it waits.
++        if !self.privacy_ready || self.archive.chat(&item.chat).is_err() {
 +            if let Err(error) = crate::scheduled::add(&self.archive, &self.dirs.id, item.clone()) {
 +                self.scheduled_unsent(&item, &format!("it could not wait ({error})"));
 +            }
