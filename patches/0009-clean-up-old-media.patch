@@ -1,8 +1,8 @@
 diff --git a/src/app.rs b/src/app.rs
-index e4f8de8..3acd4da 100644
+index 7835705..3fddf49 100644
 --- a/src/app.rs
 +++ b/src/app.rs
-@@ -10428,6 +10428,8 @@ impl App {
+@@ -10463,6 +10463,8 @@ impl App {
              self.window_focused = false;
          }
          self.report_presence();
@@ -12,11 +12,11 @@ index e4f8de8..3acd4da 100644
          self.track_focus(ctx, Instant::now());
          self.handle_tray();
 diff --git a/src/backend/worker.rs b/src/backend/worker.rs
-index e30d7a3..3305632 100644
+index a494ee6..5a5844e 100644
 --- a/src/backend/worker.rs
 +++ b/src/backend/worker.rs
 @@ -1221,6 +1221,12 @@ pub async fn run(
-                         worker.send_text(item.chat, item.text, None, item.mentions, None);
+                         worker.send_scheduled(item);
                      }
                  }
 +                // Patched build: once a day, clean up media downloaded more
@@ -221,10 +221,10 @@ index 2399077..23dc658 100644
      }
  }
 diff --git a/src/ui/settings.rs b/src/ui/settings.rs
-index 724f28b..d24373a 100644
+index 8a9ba72..a9b1118 100644
 --- a/src/ui/settings.rs
 +++ b/src/ui/settings.rs
-@@ -873,6 +873,15 @@ fn sections(app: &App) -> Vec<Section> {
+@@ -868,6 +868,15 @@ fn sections(app: &App) -> Vec<Section> {
          ],
          storage_usage,
      );

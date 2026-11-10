@@ -1,25 +1,60 @@
 diff --git a/src/app.rs b/src/app.rs
-index 7b26faa..e4f8de8 100644
+index 7b26faa..7835705 100644
 --- a/src/app.rs
 +++ b/src/app.rs
-@@ -6655,6 +6655,28 @@ impl App {
+@@ -6655,6 +6655,63 @@ impl App {
          self.follow_outgoing();
      }
  
-+    /// Patched build: queues composed text to send at `at`, in Unix seconds.
++    /// Patched build: queues composed text to send at `at`, in Unix seconds,
++    /// with the open chat's staged attachments, the text as their caption.
 +    pub(crate) fn schedule_text(&mut self, chat: ChatId, text: String, at: i64) {
 +        let text = text.trim().to_owned();
-+        if text.is_empty() {
++        let attaching = self.open_chat.as_deref() == Some(chat.as_str()) && !self.pending.is_empty();
++        if text.is_empty() && !attaching {
 +            return;
 +        }
 +        let (text, mentions) = self.encode_composer_mentions(&chat, text);
 +        self.emoji_start = None;
 +        self.mention_start = None;
 +        self.stop_composing(&chat);
++        self.drafts.remove(&chat);
++        self.draft_mentions.remove(&chat);
 +        self.store_draft(&chat, "");
-+        let item = crate::scheduled::Scheduled::new(chat, text, mentions, at);
++        let mut attachments = Vec::new();
++        if attaching {
++            for staged in std::mem::take(&mut self.pending) {
++                attachments.push(match staged.item {
++                    Pending::File(path) => crate::scheduled::Attachment::File {
++                        path,
++                        document: false,
++                    },
++                    Pending::Document(path) => crate::scheduled::Attachment::File {
++                        path,
++                        document: true,
++                    },
++                    Pending::Picture {
++                        width,
++                        height,
++                        rgba,
++                        ..
++                    } => crate::scheduled::Attachment::Picture {
++                        width: width as u32,
++                        height: height as u32,
++                        rgba: std::sync::Arc::try_unwrap(rgba).unwrap_or_else(|arc| (*arc).clone()),
++                    },
++                });
++            }
++            self.pending_view_once = false;
++            self.forget_unstaged_pictures();
++        }
++        let mut item = crate::scheduled::Scheduled::new(chat, text, mentions, at);
++        item.files = attachments
++            .iter()
++            .map(crate::scheduled::Attachment::listed)
++            .collect();
 +        crate::scheduled::show(item.clone());
-+        self.backend.send(Command::ScheduleText(item));
++        self.backend.send(Command::ScheduleText(item, attachments));
 +    }
 +
 +    /// Patched build: drops a queued text.
@@ -32,29 +67,33 @@ index 7b26faa..e4f8de8 100644
      pub(crate) fn composer_mentions(&self) -> Vec<ComposerMention> {
          self.composer_mentions.clone()
 diff --git a/src/backend.rs b/src/backend.rs
-index 9d0346b..aeb979c 100644
+index 1abbb76..7e9f53a 100644
 --- a/src/backend.rs
 +++ b/src/backend.rs
-@@ -205,6 +205,10 @@ pub enum Command {
+@@ -205,6 +205,14 @@ pub enum Command {
      FetchLinkPreview {
          url: String,
      },
-+    /// Patched build: queues a text to send later.
-+    ScheduleText(crate::scheduled::Scheduled),
-+    /// Patched build: drops a queued text.
++    /// Patched build: queues a message to send later, with the attachments
++    /// the backend keeps copies of until then.
++    ScheduleText(
++        crate::scheduled::Scheduled,
++        Vec<crate::scheduled::Attachment>,
++    ),
++    /// Patched build: drops a queued message.
 +    CancelScheduled(u64),
      SendLocation {
          chat: ChatId,
          latitude: f64,
 diff --git a/src/backend/worker.rs b/src/backend/worker.rs
-index fbf8c16..2f183c5 100644
+index fbf8c16..389424f 100644
 --- a/src/backend/worker.rs
 +++ b/src/backend/worker.rs
 @@ -1086,6 +1086,7 @@ pub async fn run(
      worker.load_state();
      crate::kept_revokes::load(&worker.archive);
      crate::kept_edits::load(&worker.archive);
-+    crate::scheduled::load(&worker.archive);
++    crate::scheduled::load(&worker.archive, &worker.dirs.state);
      worker.backfill();
      worker.backfill_lottie_stickers();
      worker.backfill_media_albums();
@@ -65,21 +104,76 @@ index fbf8c16..2f183c5 100644
 +                // Patched build: send the scheduled messages that came due.
 +                if matches!(worker.status, LinkStatus::Connected) {
 +                    for item in crate::scheduled::take_due(&worker.archive, crate::util::now()) {
-+                        worker.send_text(item.chat, item.text, None, item.mentions, None);
++                        worker.send_scheduled(item);
 +                    }
 +                }
                  worker.reveal_unconfirmed_after_grace();
                  worker.settle_presence();
                  worker.refresh_legacy_preferences();
-@@ -7280,6 +7287,8 @@ impl Worker {
+@@ -7280,6 +7287,10 @@ impl Worker {
                  preview,
              } => self.send_text(chat, text, quoting, mentions, preview),
              Command::FetchLinkPreview { url } => self.fetch_link_preview(url),
-+            Command::ScheduleText(item) => crate::scheduled::add(&self.archive, item),
-+            Command::CancelScheduled(id) => crate::scheduled::cancel(&self.archive, id),
++            Command::ScheduleText(item, attachments) => self.schedule(item, attachments),
++            Command::CancelScheduled(id) => {
++                crate::scheduled::cancel(&self.archive, &self.dirs.state, id);
++            }
              Command::SendLocation {
                  chat,
                  latitude,
+@@ -11375,6 +11386,52 @@ impl Worker {
+         (self.send_turns.insert(chat.clone(), next), turn)
+     }
+ 
++    /// Patched build: keeps ZapFast's own copy of each attachment, so the
++    /// originals can move or go before the message is sent, and queues it.
++    fn schedule(
++        &mut self,
++        mut item: crate::scheduled::Scheduled,
++        attachments: Vec<crate::scheduled::Attachment>,
++    ) {
++        match crate::scheduled::keep(&self.dirs.state, item.id, attachments) {
++            Ok(files) => {
++                item.files = files;
++                crate::scheduled::add(&self.archive, item);
++            }
++            Err(error) => {
++                crate::scheduled::discard(&self.dirs.state, item.id);
++                crate::scheduled::hide(item.id);
++                self.emit(Event::Error(format!("Not scheduled. {error}")));
++            }
++        }
++    }
++
++    /// Patched build: sends a scheduled message as the composer would have:
++    /// the text alone, or the files in runs of one kind with the text as the
++    /// first one's caption.
++    fn send_scheduled(&mut self, item: crate::scheduled::Scheduled) {
++        if item.files.is_empty() {
++            self.send_text(item.chat, item.text, None, item.mentions, None);
++            return;
++        }
++        let mut caption = Some(item.text.clone()).filter(|text| !text.is_empty());
++        let mut mentions = item.mentions.clone();
++        for (documents, paths) in item.runs() {
++            self.send_files(
++                item.chat.clone(),
++                paths,
++                FileSendOptions {
++                    documents,
++                    view_once: false,
++                },
++                caption.take(),
++                std::mem::take(&mut mentions),
++                None,
++            );
++        }
++        crate::scheduled::mark_sent(&self.dirs.state, item.id);
++    }
++
+     /// Dispatches selected files with the first attachment carrying the caption and quote.
+     fn send_files(
+         &mut self,
 diff --git a/src/lib.rs b/src/lib.rs
 index fb94370..0d65ad6 100644
 --- a/src/lib.rs
@@ -94,20 +188,27 @@ index fb94370..0d65ad6 100644
  pub mod sticker_meta;
 diff --git a/src/scheduled.rs b/src/scheduled.rs
 new file mode 100644
-index 0000000..be3f38d
+index 0000000..0a4706b
 --- /dev/null
 +++ b/src/scheduled.rs
-@@ -0,0 +1,208 @@
+@@ -0,0 +1,634 @@
 +//! Patched build: messages written now and sent later.
 +//!
 +//! Each account's backend keeps its queue in the archive's meta table, so it
 +//! survives restarts, and sends what is due on its five-second tick through
-+//! the usual text path. Nothing goes out while ZapFast is closed: a message
-+//! that came due meanwhile is sent once ZapFast is connected again. The queue
-+//! is also kept process-wide, so the composer lists it without asking the
-+//! backend.
++//! the usual text and file paths. Nothing goes out while ZapFast is closed: a
++//! message that came due meanwhile is sent once ZapFast is connected again.
++//! The queue is also kept process-wide, so the composer lists it without
++//! asking the backend.
++//!
++//! A message with attachments keeps ZapFast's own copy of each in the
++//! account's `scheduled` folder, so the originals can move or go before it is
++//! sent. A cancelled message's copies go at once; a sent one's a week after
++//! it went, as a file that could not be sent may still be offered again.
 +
++use std::path::{Path, PathBuf};
 +use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError};
++use std::time::{Duration, SystemTime};
 +
 +use serde::{Deserialize, Serialize};
 +
@@ -116,16 +217,69 @@ index 0000000..be3f38d
 +
 +const META_KEY: &str = "fork_scheduled";
 +
++/// How long a sent message's copies are kept.
++const KEEP_SENT: Duration = Duration::from_secs(7 * 24 * 60 * 60);
++
++/// The furthest day the composer offers, counted from today.
++pub const LAST_DAY: i64 = 6;
++
 +#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 +pub struct Scheduled {
 +    /// Unique for the life of the queue.
 +    pub id: u64,
 +    pub chat: ChatId,
-+    /// Composer text, its mentions already encoded.
++    /// Composer text, its mentions already encoded; the first file's caption
++    /// when there are files.
 +    pub text: String,
 +    pub mentions: Vec<String>,
 +    /// When to send, in Unix seconds.
 +    pub at: i64,
++    /// Attachments, in the order they were staged. Queues saved before files
++    /// could be scheduled have none.
++    #[serde(default)]
++    pub files: Vec<ScheduledFile>,
++}
++
++/// One scheduled attachment.
++#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
++pub struct ScheduledFile {
++    /// ZapFast's own copy once the backend has queued the message; the
++    /// original until then.
++    pub path: PathBuf,
++    /// Sent as a document with its own bytes, as the composer's document
++    /// attachments are.
++    pub document: bool,
++}
++
++/// An attachment as the composer hands it over to be scheduled.
++#[derive(Debug)]
++pub enum Attachment {
++    File { path: PathBuf, document: bool },
++    /// A pasted picture as straight-alpha RGBA, kept as a PNG.
++    Picture {
++        width: u32,
++        height: u32,
++        rgba: Vec<u8>,
++    },
++}
++
++/// The file name a pasted picture is kept and sent under.
++const PICTURE_NAME: &str = "picture.png";
++
++impl Attachment {
++    /// What the composer lists until the backend has made its copy.
++    pub fn listed(&self) -> ScheduledFile {
++        match self {
++            Self::File { path, document } => ScheduledFile {
++                path: path.clone(),
++                document: *document,
++            },
++            Self::Picture { .. } => ScheduledFile {
++                path: PathBuf::from(PICTURE_NAME),
++                document: false,
++            },
++        }
++    }
 +}
 +
 +impl Scheduled {
@@ -139,6 +293,151 @@ index 0000000..be3f38d
 +            text,
 +            mentions,
 +            at,
++            files: Vec::new(),
++        }
++    }
++
++    /// One line for the composer's list: the files, then the text.
++    pub fn preview(&self) -> String {
++        let text = self.text.lines().next().unwrap_or_default();
++        let Some(first) = self.files.first() else {
++            return text.to_owned();
++        };
++        let name = first
++            .path
++            .file_name()
++            .map(|name| name.to_string_lossy().into_owned())
++            .unwrap_or_default();
++        let files = match self.files.len() {
++            1 => name,
++            count => format!("{name} and {} more", count - 1),
++        };
++        if text.is_empty() {
++            files
++        } else {
++            format!("{files} · {text}")
++        }
++    }
++
++    /// The files in runs of one kind, as the composer sends them: each run
++    /// goes as one send, the caption with the first.
++    pub fn runs(&self) -> Vec<(bool, Vec<PathBuf>)> {
++        let mut runs: Vec<(bool, Vec<PathBuf>)> = Vec::new();
++        for file in &self.files {
++            match runs.last_mut() {
++                Some((document, paths)) if *document == file.document => {
++                    paths.push(file.path.clone());
++                }
++                _ => runs.push((file.document, vec![file.path.clone()])),
++            }
++        }
++        runs
++    }
++}
++
++/// Where a message's copies are kept.
++fn files_dir(state: &Path, id: u64) -> PathBuf {
++    state.join("scheduled").join(id.to_string())
++}
++
++/// Keeps ZapFast's own copy of each attachment, under its own name, as a
++/// document's name is what the other side sees.
++pub fn keep(state: &Path, id: u64, attachments: Vec<Attachment>) -> Result<Vec<ScheduledFile>, String> {
++    let dir = files_dir(state, id);
++    let mut files = Vec::new();
++    for (index, attachment) in attachments.into_iter().enumerate() {
++        // A folder each, so two files of one name both keep it.
++        let slot = dir.join(index.to_string());
++        std::fs::create_dir_all(&slot)
++            .map_err(|error| format!("Could not keep the attachments: {error}"))?;
++        match attachment {
++            Attachment::File { path, document } => {
++                let name = path
++                    .file_name()
++                    .map(|name| name.to_owned())
++                    .ok_or_else(|| format!("{} is not a file", path.display()))?;
++                let copy = slot.join(&name);
++                std::fs::copy(&path, &copy).map_err(|error| {
++                    format!(
++                        "Could not keep a copy of {}: {error}",
++                        name.to_string_lossy()
++                    )
++                })?;
++                files.push(ScheduledFile {
++                    path: copy,
++                    document,
++                });
++            }
++            Attachment::Picture {
++                width,
++                height,
++                rgba,
++            } => {
++                use image::ImageEncoder;
++                let copy = slot.join(PICTURE_NAME);
++                let mut bytes = Vec::new();
++                image::codecs::png::PngEncoder::new(&mut bytes)
++                    .write_image(&rgba, width, height, image::ExtendedColorType::Rgba8)
++                    .map_err(|error| format!("Could not keep the picture: {error}"))?;
++                std::fs::write(&copy, bytes)
++                    .map_err(|error| format!("Could not keep the picture: {error}"))?;
++                files.push(ScheduledFile {
++                    path: copy,
++                    document: false,
++                });
++            }
++        }
++    }
++    Ok(files)
++}
++
++/// Removes a message's copies.
++pub fn discard(state: &Path, id: u64) {
++    let dir = files_dir(state, id);
++    if dir.exists()
++        && let Err(error) = std::fs::remove_dir_all(&dir)
++    {
++        log::warn!("could not remove a scheduled message's files: {error}");
++    }
++}
++
++/// The mark a message's folder gets when it is sent, dated then.
++const SENT_MARK: &str = "sent";
++
++/// Notes that a message's files went out, which starts their week.
++pub fn mark_sent(state: &Path, id: u64) {
++    let dir = files_dir(state, id);
++    if dir.exists()
++        && let Err(error) = std::fs::write(dir.join(SENT_MARK), b"")
++    {
++        log::warn!("could not mark a scheduled message sent: {error}");
++    }
++}
++
++/// Removes the copies of messages no longer queued a week after they went,
++/// or a week after they were made when the mark is missing.
++fn sweep(state: &Path, queue: &[Scheduled], now: SystemTime) {
++    let Ok(entries) = std::fs::read_dir(state.join("scheduled")) else {
++        return;
++    };
++    for entry in entries.flatten() {
++        let queued = entry
++            .file_name()
++            .to_str()
++            .and_then(|name| name.parse::<u64>().ok())
++            .is_some_and(|id| queue.iter().any(|item| item.id == id));
++        if queued {
++            continue;
++        }
++        let dated = std::fs::metadata(entry.path().join(SENT_MARK))
++            .or_else(|_| entry.metadata())
++            .and_then(|meta| meta.modified());
++        let old = dated
++            .ok()
++            .and_then(|modified| now.duration_since(modified).ok())
++            .is_some_and(|age| age > KEEP_SENT);
++        if old {
++            let _ = std::fs::remove_dir_all(entry.path());
 +        }
 +    }
 +}
@@ -171,18 +470,23 @@ index 0000000..be3f38d
 +    }
 +}
 +
-+/// Lists this archive's queue in the composer, when the backend starts.
-+pub fn load(archive: &Archive) {
-+    for item in stored(archive) {
++/// Lists this archive's queue in the composer, when the backend starts, and
++/// clears out copies kept for messages long sent.
++pub fn load(archive: &Archive, state: &Path) {
++    let queue = stored(archive);
++    sweep(state, &queue, SystemTime::now());
++    for item in queue {
 +        show(item);
 +    }
 +}
 +
-+/// Lists a message in the composer at once, before the backend saves it.
++/// Lists a message in the composer at once, before the backend saves it,
++/// or updates it once the backend has its copies.
 +pub fn show(item: Scheduled) {
 +    let mut shown = shown();
-+    if !shown.iter().any(|known| known.id == item.id) {
-+        shown.push(item);
++    match shown.iter_mut().find(|known| known.id == item.id) {
++        Some(known) => *known = item,
++        None => shown.push(item),
 +    }
 +}
 +
@@ -201,14 +505,15 @@ index 0000000..be3f38d
 +    show(item);
 +}
 +
-+/// Drops a message that was to be sent later.
-+pub fn cancel(archive: &Archive, id: u64) {
++/// Drops a message that was to be sent later, with its copies.
++pub fn cancel(archive: &Archive, state: &Path, id: u64) {
 +    let mut queue = stored(archive);
 +    let before = queue.len();
 +    queue.retain(|item| item.id != id);
 +    if queue.len() != before {
 +        store(archive, &queue);
 +    }
++    discard(state, id);
 +    hide(id);
 +}
 +
@@ -264,9 +569,8 @@ index 0000000..be3f38d
 +    presets
 +}
 +
-+/// The next time the clock reads `text` ("21:30" or "9:05"): today, or
-+/// tomorrow once that has passed.
-+pub fn next_at(now: i64, text: &str) -> Option<i64> {
++/// The hour and minute of "21:30" or "9:05".
++fn clock_of(text: &str) -> Option<(i8, i8)> {
 +    let (hour, minute) = text.trim().split_once(':')?;
 +    let hour: i8 = hour.trim().parse().ok().filter(|hour| (0..24).contains(hour))?;
 +    let minute: i8 = minute
@@ -274,6 +578,51 @@ index 0000000..be3f38d
 +        .parse()
 +        .ok()
 +        .filter(|minute| (0..60).contains(minute))?;
++    Some((hour, minute))
++}
++
++/// The date `day` days after the one `now` falls on.
++fn date_after(now: i64, day: i64) -> Option<jiff::civil::Date> {
++    let mut date = jiff::Timestamp::from_second(now)
++        .ok()?
++        .to_zoned(jiff::tz::TimeZone::system())
++        .date();
++    for _ in 0..day {
++        date = date.tomorrow().ok()?;
++    }
++    Some(date)
++}
++
++/// When the clock reads `text` on the day `day` days from today. Today means
++/// the next time it does: today, or tomorrow once that has passed.
++pub fn at_on(now: i64, day: i64, text: &str) -> Option<i64> {
++    if day <= 0 {
++        return next_at(now, text);
++    }
++    let (hour, minute) = clock_of(text)?;
++    let date = date_after(now, day.min(LAST_DAY))?;
++    let at = date
++        .at(hour, minute, 0, 0)
++        .to_zoned(jiff::tz::TimeZone::system())
++        .ok()?;
++    Some(at.timestamp().as_second())
++}
++
++/// "Today", "Tomorrow", or "Thu 13 Nov" for the day `day` days from today.
++pub fn day_label(now: i64, day: i64) -> String {
++    match day {
++        ..=0 => "Today".to_owned(),
++        1 => "Tomorrow".to_owned(),
++        _ => date_after(now, day)
++            .map(|date| date.strftime("%a %d %b").to_string())
++            .unwrap_or_default(),
++    }
++}
++
++/// The next time the clock reads `text` ("21:30" or "9:05"): today, or
++/// tomorrow once that has passed.
++pub fn next_at(now: i64, text: &str) -> Option<i64> {
++    let (hour, minute) = clock_of(text)?;
 +    let zone = jiff::tz::TimeZone::system();
 +    let local = jiff::Timestamp::from_second(now).ok()?.to_zoned(zone.clone());
 +    let today = local
@@ -306,11 +655,216 @@ index 0000000..be3f38d
 +        format!("{} at {time}", date.strftime("%a %d %b"))
 +    }
 +}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    fn file(path: &str, document: bool) -> ScheduledFile {
++        ScheduledFile {
++            path: PathBuf::from(path),
++            document,
++        }
++    }
++
++    #[test]
++    fn a_queue_saved_before_files_still_loads() {
++        let archive = Archive::in_memory().unwrap();
++        archive
++            .set_meta(
++                META_KEY,
++                r#"[{"id":7,"chat":"1@s.whatsapp.net","text":"hi","mentions":[],"at":100}]"#,
++            )
++            .unwrap();
++        let queue = stored(&archive);
++        assert_eq!(queue.len(), 1);
++        assert_eq!(queue[0].text, "hi");
++        assert!(queue[0].files.is_empty());
++    }
++
++    #[test]
++    fn files_go_in_runs_of_one_kind_in_their_order() {
++        let mut item = Scheduled::new("1@s.whatsapp.net".into(), "caption".into(), Vec::new(), 0);
++        item.files = vec![
++            file("a.jpg", false),
++            file("b.mp3", false),
++            file("c.pdf", true),
++            file("d.png", false),
++        ];
++        assert_eq!(
++            item.runs(),
++            vec![
++                (false, vec![PathBuf::from("a.jpg"), PathBuf::from("b.mp3")]),
++                (true, vec![PathBuf::from("c.pdf")]),
++                (false, vec![PathBuf::from("d.png")]),
++            ]
++        );
++    }
++
++    #[test]
++    fn the_preview_names_the_files_then_the_text() {
++        let mut item = Scheduled::new("1@s.whatsapp.net".into(), "for you\nmore".into(), Vec::new(), 0);
++        assert_eq!(item.preview(), "for you");
++        item.files = vec![file("dir/song.mp3", false)];
++        assert_eq!(item.preview(), "song.mp3 · for you");
++        item.files.push(file("dir/cover.png", false));
++        item.text.clear();
++        assert_eq!(item.preview(), "song.mp3 and 1 more");
++    }
++
++    #[test]
++    fn kept_copies_outlive_the_originals_and_go_on_cancel() {
++        let originals = tempfile::tempdir().unwrap();
++        let state = tempfile::tempdir().unwrap();
++        let song = originals.path().join("song.mp3");
++        std::fs::write(&song, b"music").unwrap();
++        let twin = originals.path().join("twin");
++        std::fs::create_dir(&twin).unwrap();
++        let other = twin.join("song.mp3");
++        std::fs::write(&other, b"other").unwrap();
++        let files = keep(
++            state.path(),
++            42,
++            vec![
++                Attachment::File {
++                    path: song.clone(),
++                    document: false,
++                },
++                Attachment::File {
++                    path: other,
++                    document: true,
++                },
++                Attachment::Picture {
++                    width: 2,
++                    height: 1,
++                    rgba: vec![255, 0, 0, 255, 0, 0, 255, 128],
++                },
++            ],
++        )
++        .unwrap();
++        std::fs::remove_dir_all(originals.path()).unwrap();
++        assert_eq!(files.len(), 3);
++        assert!(files.iter().all(|kept| kept.path.starts_with(state.path())));
++        assert_eq!(files[0].path.file_name().unwrap(), "song.mp3");
++        assert_eq!(std::fs::read(&files[0].path).unwrap(), b"music");
++        assert_eq!(std::fs::read(&files[1].path).unwrap(), b"other");
++        assert!(files[1].document);
++        let picture = image::open(&files[2].path).unwrap().to_rgba8();
++        assert_eq!(picture.dimensions(), (2, 1));
++        assert_eq!(picture.get_pixel(1, 0).0, [0, 0, 255, 128]);
++
++        let archive = Archive::in_memory().unwrap();
++        let mut item = Scheduled::new("1@s.whatsapp.net".into(), String::new(), Vec::new(), 0);
++        item.id = 42;
++        item.files = files;
++        add(&archive, item);
++        cancel(&archive, state.path(), 42);
++        assert!(stored(&archive).is_empty());
++        assert!(!files_dir(state.path(), 42).exists());
++    }
++
++    #[test]
++    fn a_missing_original_is_not_scheduled() {
++        let state = tempfile::tempdir().unwrap();
++        let missing = state.path().join("gone.mp3");
++        let kept = keep(
++            state.path(),
++            9,
++            vec![Attachment::File {
++                path: missing,
++                document: false,
++            }],
++        );
++        assert!(kept.unwrap_err().contains("gone.mp3"));
++    }
++
++    #[test]
++    fn only_copies_of_messages_long_gone_are_swept() {
++        let state = tempfile::tempdir().unwrap();
++        for id in [1_u64, 2, 3] {
++            std::fs::create_dir_all(files_dir(state.path(), id)).unwrap();
++        }
++        mark_sent(state.path(), 3);
++        let mut queued = Scheduled::new("1@s.whatsapp.net".into(), String::new(), Vec::new(), 0);
++        queued.id = 1;
++        let later = SystemTime::now() + KEEP_SENT + Duration::from_secs(60);
++        sweep(state.path(), &[queued.clone()], SystemTime::now());
++        assert!(files_dir(state.path(), 2).exists(), "not a week old yet");
++        sweep(state.path(), &[queued], later);
++        assert!(files_dir(state.path(), 1).exists(), "still queued");
++        assert!(!files_dir(state.path(), 2).exists());
++        assert!(!files_dir(state.path(), 3).exists());
++    }
++
++    #[test]
++    fn a_chosen_day_sends_at_that_time_on_that_day() {
++        let zone = jiff::tz::TimeZone::system();
++        let noon = jiff::civil::date(2026, 11, 10)
++            .at(12, 0, 0, 0)
++            .to_zoned(zone.clone())
++            .unwrap();
++        let now = noon.timestamp().as_second();
++        let at = |date: jiff::civil::Date, hour, minute| {
++            date.at(hour, minute, 0, 0)
++                .to_zoned(zone.clone())
++                .unwrap()
++                .timestamp()
++                .as_second()
++        };
++        let today = noon.date();
++        assert_eq!(at_on(now, 0, "21:30"), Some(at(today, 21, 30)));
++        assert_eq!(
++            at_on(now, 0, "9:05"),
++            Some(at(today.tomorrow().unwrap(), 9, 5)),
++            "a time already passed today is tomorrow's"
++        );
++        let thursday = jiff::civil::date(2026, 11, 12);
++        assert_eq!(at_on(now, 2, "9:05"), Some(at(thursday, 9, 5)));
++        assert_eq!(at_on(now, 2, "25:00"), None);
++        assert_eq!(day_label(now, 0), "Today");
++        assert_eq!(day_label(now, 1), "Tomorrow");
++        assert_eq!(day_label(now, 2), "Thu 12 Nov");
++    }
++}
+diff --git a/src/ui/attachment_preview.rs b/src/ui/attachment_preview.rs
+index 34b3059..2b52b7a 100644
+--- a/src/ui/attachment_preview.rs
++++ b/src/ui/attachment_preview.rs
+@@ -161,7 +161,7 @@ pub fn bar(app: &mut App, ui: &mut egui::Ui) -> bool {
+                             });
+                     },
+                 );
+-                send = theme::circle_button(
++                let button = theme::circle_button(
+                     ui,
+                     Icon::Send,
+                     44.0,
+@@ -170,8 +170,18 @@ pub fn bar(app: &mut App, ui: &mut egui::Ui) -> bool {
+                     palette.on_accent,
+                     "Send",
+                 )
+-                .tab_stop(Stop::Send)
+-                .clicked();
++                .tab_stop(Stop::Send);
++                send = button.clicked();
++                // Patched build: right-click Send to send the files later.
++                if let Some(chat) = app.open_chat.clone()
++                    && app.editing.is_none()
++                    && app.reply_to.is_none()
++                    && !app.pending_view_once
++                {
++                    egui::Popup::context_menu(&button)
++                        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
++                        .show(|ui| super::conversation::schedule_menu(app, ui, &chat));
++                }
+             });
+         });
+     if let Some(index) = remove {
 diff --git a/src/ui/conversation.rs b/src/ui/conversation.rs
-index 24557cd..1ba637d 100644
+index c436952..d42f0a0 100644
 --- a/src/ui/conversation.rs
 +++ b/src/ui/conversation.rs
-@@ -1606,6 +1606,7 @@ fn composer(app: &mut App, ui: &mut egui::Ui, chat: &Chat, review_send: Option<b
+@@ -1615,6 +1615,7 @@ fn composer(app: &mut App, ui: &mut egui::Ui, chat: &Chat, review_send: Option<b
              {
                  unsent_voice_strip(app, ui, samples);
              }
@@ -318,7 +872,7 @@ index 24557cd..1ba637d 100644
              if app.editing.is_some() {
                  edit_strip(app, ui);
              } else if let Some(reply_id) = app.reply_to.clone() {
-@@ -2091,12 +2092,19 @@ fn composer(app: &mut App, ui: &mut egui::Ui, chat: &Chat, review_send: Option<b
+@@ -2100,12 +2101,19 @@ fn composer(app: &mut App, ui: &mut egui::Ui, chat: &Chat, review_send: Option<b
                      } else {
                          Icon::Send
                      };
@@ -342,7 +896,7 @@ index 24557cd..1ba637d 100644
                  });
                  }
              },
-@@ -2471,6 +2479,97 @@ fn upload_strips(app: &mut App, ui: &mut egui::Ui, chat: &str) {
+@@ -2480,6 +2488,125 @@ fn upload_strips(app: &mut App, ui: &mut egui::Ui, chat: &str) {
      }
  }
  
@@ -365,7 +919,7 @@ index 24557cd..1ba637d 100644
 +                    theme::semibold(12.5),
 +                    palette.accent,
 +                );
-+                let preview = item.text.lines().next().unwrap_or_default().to_owned();
++                let preview = item.preview();
 +                let width = (ui.available_width() - 30.0).max(0.0);
 +                ui.allocate_ui_with_layout(
 +                    vec2(width, 18.0),
@@ -393,8 +947,8 @@ index 24557cd..1ba637d 100644
 +}
 +
 +/// Patched build: the Send button's right-click menu, which sends the
-+/// composed text later instead of now.
-+fn schedule_menu(app: &mut App, ui: &mut egui::Ui, chat: &str) {
++/// composed text, and any attachments, later instead of now.
++pub(super) fn schedule_menu(app: &mut App, ui: &mut egui::Ui, chat: &str) {
 +    let palette = app.palette;
 +    let now = crate::util::now();
 +    let mut chosen = None;
@@ -406,7 +960,34 @@ index 24557cd..1ba637d 100644
 +    }
 +    let id = egui::Id::new("schedule-at");
 +    let mut custom = ui.data(|data| data.get_temp::<String>(id)).unwrap_or_default();
-+    let custom_at = crate::scheduled::next_at(now, &custom);
++    // The day the typed time is on, from today up to six days ahead.
++    let day_id = egui::Id::new("schedule-day");
++    let mut day = ui.data(|data| data.get_temp::<i64>(day_id)).unwrap_or(0);
++    ui.horizontal(|ui| {
++        if ui
++            .add_enabled(day > 0, egui::Button::new("‹").small())
++            .on_hover_text("Earlier day")
++            .clicked()
++        {
++            day -= 1;
++        }
++        ui.add_sized(
++            vec2(76.0, 18.0),
++            egui::Label::new(crate::scheduled::day_label(now, day)),
++        );
++        if ui
++            .add_enabled(
++                day < crate::scheduled::LAST_DAY,
++                egui::Button::new("›").small(),
++            )
++            .on_hover_text("Later day")
++            .clicked()
++        {
++            day += 1;
++        }
++    });
++    ui.data_mut(|data| data.insert_temp(day_id, day));
++    let custom_at = crate::scheduled::at_on(now, day, &custom);
 +    ui.horizontal(|ui| {
 +        let field = ui.add(
 +            egui::TextEdit::singleline(&mut custom)
@@ -430,6 +1011,7 @@ index 24557cd..1ba637d 100644
 +    });
 +    ui.data_mut(|data| data.insert_temp(id, custom));
 +    if let Some(at) = chosen {
++        ui.data_mut(|data| data.remove::<i64>(day_id));
 +        let text = std::mem::take(&mut app.composer);
 +        app.schedule_text(chat.to_owned(), text, at);
 +        app.focus_composer = true;
