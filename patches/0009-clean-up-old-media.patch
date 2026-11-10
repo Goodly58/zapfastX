@@ -16,7 +16,7 @@ index a494ee6..5a5844e 100644
 --- a/src/backend/worker.rs
 +++ b/src/backend/worker.rs
 @@ -1221,6 +1221,12 @@ pub async fn run(
-                         worker.send_scheduled(item);
+                         worker.send_scheduled(item).await;
                      }
                  }
 +                // Patched build: once a day, clean up media downloaded more
