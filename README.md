@@ -7,7 +7,7 @@
 - **Edits keep their history.** Hover *edited* on someone's message to see what it said before.
 - **Screen privacy.** Covers chats, messages, media, names and avatars until hovered (Ctrl+Shift+H, off by default). By [paulo1403](https://github.com/paulo1403) ([crmne/zapfast#451](https://github.com/crmne/zapfast/pull/451)), via [ZapFaster](https://github.com/eternalwaitt/zap-faster).
 - **Ghost mode.** Never shows you as online (Settings → Privacy, off by default).
-- **Scheduled messages.** Right-click Send to send later. Waiting messages sit above the composer until they go.
+- **Scheduled messages.** Right-click Send to send text, photos or files later, up to a week ahead. Waiting messages sit above the composer until they go.
 - **Updates come from this repository**, so they keep these changes.
 
 <p align="center">

@@ -1,8 +1,19 @@
 diff --git a/src/app.rs b/src/app.rs
-index 7b26faa..7835705 100644
+index 7b26faa..a561d18 100644
 --- a/src/app.rs
 +++ b/src/app.rs
-@@ -6655,6 +6655,63 @@ impl App {
+@@ -5747,6 +5747,10 @@ impl App {
+                 self.locale,
+                 "Not sent: view-once mode is available for one photo at a time.",
+             ),
++            Refusal::NotScheduled => crate::i18n::gettext(
++                self.locale,
++                "Not scheduled: ZapFast could not keep it to send later, so it is back in the composer.",
++            ),
+         };
+         self.toast_error(message.into_owned());
+     }
+@@ -6655,6 +6659,63 @@ impl App {
          self.follow_outgoing();
      }
  
@@ -67,10 +78,10 @@ index 7b26faa..7835705 100644
      pub(crate) fn composer_mentions(&self) -> Vec<ComposerMention> {
          self.composer_mentions.clone()
 diff --git a/src/backend.rs b/src/backend.rs
-index 1abbb76..7e9f53a 100644
+index 1abbb76..1bfffac 100644
 --- a/src/backend.rs
 +++ b/src/backend.rs
-@@ -205,6 +205,14 @@ pub enum Command {
+@@ -205,6 +205,20 @@ pub enum Command {
      FetchLinkPreview {
          url: String,
      },
@@ -80,13 +91,28 @@ index 1abbb76..7e9f53a 100644
 +        crate::scheduled::Scheduled,
 +        Vec<crate::scheduled::Attachment>,
 +    ),
++    /// Patched build: a scheduled message's copies are made, or could not be.
++    ScheduleKept(
++        crate::scheduled::Scheduled,
++        Vec<crate::scheduled::Attachment>,
++        Result<Vec<crate::scheduled::ScheduledFile>, String>,
++    ),
 +    /// Patched build: drops a queued message.
 +    CancelScheduled(u64),
      SendLocation {
          chat: ChatId,
          latitude: f64,
+@@ -1710,6 +1724,8 @@ pub enum Refusal {
+     QuoteUnavailable,
+     /// View-once sends must be one photo, not a document or batch.
+     UnsupportedViewOnce,
++    /// Patched build: a scheduled message could not be kept to send later.
++    NotScheduled,
+ }
+ 
+ /// The content of a refused send.
 diff --git a/src/backend/worker.rs b/src/backend/worker.rs
-index fbf8c16..389424f 100644
+index fbf8c16..62ae49b 100644
 --- a/src/backend/worker.rs
 +++ b/src/backend/worker.rs
 @@ -1086,6 +1086,7 @@ pub async fn run(
@@ -110,38 +136,97 @@ index fbf8c16..389424f 100644
                  worker.reveal_unconfirmed_after_grace();
                  worker.settle_presence();
                  worker.refresh_legacy_preferences();
-@@ -7280,6 +7287,10 @@ impl Worker {
+@@ -7280,6 +7287,17 @@ impl Worker {
                  preview,
              } => self.send_text(chat, text, quoting, mentions, preview),
              Command::FetchLinkPreview { url } => self.fetch_link_preview(url),
 +            Command::ScheduleText(item, attachments) => self.schedule(item, attachments),
++            Command::ScheduleKept(item, attachments, kept) => {
++                self.queue_scheduled(item, attachments, kept);
++            }
 +            Command::CancelScheduled(id) => {
-+                crate::scheduled::cancel(&self.archive, &self.dirs.state, id);
++                if let Err(error) = crate::scheduled::cancel(&self.archive, &self.dirs.state, id) {
++                    // Still queued, so it is listed again.
++                    crate::scheduled::load(&self.archive, &self.dirs.state);
++                    self.emit(Event::Error(format!("Could not cancel the scheduled message: {error}")));
++                }
 +            }
              Command::SendLocation {
                  chat,
                  latitude,
-@@ -11375,6 +11386,52 @@ impl Worker {
+@@ -11375,6 +11393,105 @@ impl Worker {
          (self.send_turns.insert(chat.clone(), next), turn)
      }
  
 +    /// Patched build: keeps ZapFast's own copy of each attachment, so the
-+    /// originals can move or go before the message is sent, and queues it.
++    /// originals can move or go before the message is sent, then queues it.
++    /// The copies are made off this thread, as a long video takes a while.
 +    fn schedule(
++        &mut self,
++        item: crate::scheduled::Scheduled,
++        attachments: Vec<crate::scheduled::Attachment>,
++    ) {
++        if attachments.is_empty() {
++            self.queue_scheduled(item, attachments, Ok(Vec::new()));
++            return;
++        }
++        let state = self.dirs.state.clone();
++        let commands = self.commands.clone();
++        tokio::task::spawn_blocking(move || {
++            let kept = crate::scheduled::keep(&state, item.id, &attachments);
++            let _ = commands.send(Command::ScheduleKept(item, attachments, kept));
++        });
++    }
++
++    /// Patched build: queues a scheduled message once its copies are made.
++    /// One that cannot be queued goes back to the composer as it was.
++    fn queue_scheduled(
 +        &mut self,
 +        mut item: crate::scheduled::Scheduled,
 +        attachments: Vec<crate::scheduled::Attachment>,
++        kept: Result<Vec<crate::scheduled::ScheduledFile>, String>,
 +    ) {
-+        match crate::scheduled::keep(&self.dirs.state, item.id, attachments) {
-+            Ok(files) => {
-+                item.files = files;
-+                crate::scheduled::add(&self.archive, item);
-+            }
-+            Err(error) => {
-+                crate::scheduled::discard(&self.dirs.state, item.id);
-+                crate::scheduled::hide(item.id);
-+                self.emit(Event::Error(format!("Not scheduled. {error}")));
-+            }
++        if crate::scheduled::was_cancelled(item.id) {
++            crate::scheduled::discard(&self.dirs.state, item.id);
++            return;
++        }
++        let queued = kept.and_then(|files| {
++            item.files = files;
++            crate::scheduled::add(&self.archive, item.clone())
++        });
++        let Err(error) = queued else {
++            return;
++        };
++        log::warn!("could not schedule a message: {error}");
++        crate::scheduled::discard(&self.dirs.state, item.id);
++        crate::scheduled::hide(item.id);
++        let mut caption = Some(item.text).filter(|text| !text.is_empty());
++        if attachments.is_empty() {
++            let text = caption.unwrap_or_default();
++            self.refuse(item.chat, None, Unsent::Text(text), Refusal::NotScheduled);
++            return;
++        }
++        for attachment in attachments {
++            let unsent = match attachment {
++                crate::scheduled::Attachment::File { path, document } => Unsent::Files {
++                    paths: vec![path],
++                    documents: document,
++                    view_once: false,
++                    caption: caption.take(),
++                },
++                crate::scheduled::Attachment::Picture {
++                    width,
++                    height,
++                    rgba,
++                } => Unsent::Image {
++                    width,
++                    height,
++                    rgba,
++                    view_once: false,
++                    caption: caption.take(),
++                },
++            };
++            self.refuse(item.chat.clone(), None, unsent, Refusal::NotScheduled);
 +        }
 +    }
 +
@@ -169,6 +254,7 @@ index fbf8c16..389424f 100644
 +            );
 +        }
 +        crate::scheduled::mark_sent(&self.dirs.state, item.id);
++        crate::scheduled::tidy(&self.archive, &self.dirs.state);
 +    }
 +
      /// Dispatches selected files with the first attachment carrying the caption and quote.
@@ -188,10 +274,10 @@ index fb94370..0d65ad6 100644
  pub mod sticker_meta;
 diff --git a/src/scheduled.rs b/src/scheduled.rs
 new file mode 100644
-index 0000000..0a4706b
+index 0000000..42c20cf
 --- /dev/null
 +++ b/src/scheduled.rs
-@@ -0,0 +1,634 @@
+@@ -0,0 +1,707 @@
 +//! Patched build: messages written now and sent later.
 +//!
 +//! Each account's backend keeps its queue in the archive's meta table, so it
@@ -341,31 +427,29 @@ index 0000000..0a4706b
 +}
 +
 +/// Keeps ZapFast's own copy of each attachment, under its own name, as a
-+/// document's name is what the other side sees.
-+pub fn keep(state: &Path, id: u64, attachments: Vec<Attachment>) -> Result<Vec<ScheduledFile>, String> {
++/// document's name is what the other side sees. The attachments stay the
++/// caller's, to go back to the composer if this fails.
++pub fn keep(state: &Path, id: u64, attachments: &[Attachment]) -> Result<Vec<ScheduledFile>, String> {
 +    let dir = files_dir(state, id);
 +    let mut files = Vec::new();
-+    for (index, attachment) in attachments.into_iter().enumerate() {
++    for (index, attachment) in attachments.iter().enumerate() {
 +        // A folder each, so two files of one name both keep it.
 +        let slot = dir.join(index.to_string());
 +        std::fs::create_dir_all(&slot)
 +            .map_err(|error| format!("Could not keep the attachments: {error}"))?;
 +        match attachment {
 +            Attachment::File { path, document } => {
++                // The queue is JSON, so the copy's name must be valid text.
 +                let name = path
 +                    .file_name()
-+                    .map(|name| name.to_owned())
++                    .map(|name| name.to_string_lossy().into_owned())
 +                    .ok_or_else(|| format!("{} is not a file", path.display()))?;
 +                let copy = slot.join(&name);
-+                std::fs::copy(&path, &copy).map_err(|error| {
-+                    format!(
-+                        "Could not keep a copy of {}: {error}",
-+                        name.to_string_lossy()
-+                    )
-+                })?;
++                std::fs::copy(path, &copy)
++                    .map_err(|error| format!("Could not keep a copy of {name}: {error}"))?;
 +                files.push(ScheduledFile {
 +                    path: copy,
-+                    document,
++                    document: *document,
 +                });
 +            }
 +            Attachment::Picture {
@@ -374,10 +458,14 @@ index 0000000..0a4706b
 +                rgba,
 +            } => {
 +                use image::ImageEncoder;
++                let expected = u64::from(*width) * u64::from(*height) * 4;
++                if rgba.len() as u64 != expected {
++                    return Err("Could not keep the picture: its pixels are incomplete".to_owned());
++                }
 +                let copy = slot.join(PICTURE_NAME);
 +                let mut bytes = Vec::new();
 +                image::codecs::png::PngEncoder::new(&mut bytes)
-+                    .write_image(&rgba, width, height, image::ExtendedColorType::Rgba8)
++                    .write_image(rgba, *width, *height, image::ExtendedColorType::Rgba8)
 +                    .map_err(|error| format!("Could not keep the picture: {error}"))?;
 +                std::fs::write(&copy, bytes)
 +                    .map_err(|error| format!("Could not keep the picture: {error}"))?;
@@ -459,15 +547,31 @@ index 0000000..0a4706b
 +        .unwrap_or_default()
 +}
 +
-+fn store(archive: &Archive, queue: &[Scheduled]) {
-+    match serde_json::to_string(queue) {
-+        Ok(json) => {
-+            if let Err(error) = archive.set_meta(META_KEY, &json) {
-+                log::warn!("could not save the scheduled messages: {error}");
-+            }
-+        }
-+        Err(error) => log::warn!("could not encode the scheduled messages: {error}"),
-+    }
++fn store(archive: &Archive, queue: &[Scheduled]) -> Result<(), String> {
++    let json = serde_json::to_string(queue)
++        .map_err(|error| format!("could not encode the scheduled messages: {error}"))?;
++    archive
++        .set_meta(META_KEY, &json)
++        .map_err(|error| format!("could not save the scheduled messages: {error}"))
++}
++
++/// Messages cancelled before the backend had queued them, while their
++/// attachments were still being copied.
++fn cancelled() -> MutexGuard<'static, Vec<u64>> {
++    static CANCELLED: OnceLock<Mutex<Vec<u64>>> = OnceLock::new();
++    CANCELLED
++        .get_or_init(Default::default)
++        .lock()
++        .unwrap_or_else(PoisonError::into_inner)
++}
++
++/// Whether the message was cancelled while its copies were being made,
++/// forgetting it either way.
++pub fn was_cancelled(id: u64) -> bool {
++    let mut cancelled = cancelled();
++    let before = cancelled.len();
++    cancelled.retain(|known| *known != id);
++    cancelled.len() != before
 +}
 +
 +/// Lists this archive's queue in the composer, when the backend starts, and
@@ -478,6 +582,11 @@ index 0000000..0a4706b
 +    for item in queue {
 +        show(item);
 +    }
++}
++
++/// Clears out copies kept for messages long sent.
++pub fn tidy(archive: &Archive, state: &Path) {
++    sweep(state, &stored(archive), SystemTime::now());
 +}
 +
 +/// Lists a message in the composer at once, before the backend saves it,
@@ -495,36 +604,46 @@ index 0000000..0a4706b
 +    shown().retain(|item| item.id != id);
 +}
 +
-+/// Saves a message to send later.
-+pub fn add(archive: &Archive, item: Scheduled) {
++/// Saves a message to send later, and lists it once it is saved.
++pub fn add(archive: &Archive, item: Scheduled) -> Result<(), String> {
 +    let mut queue = stored(archive);
 +    if !queue.iter().any(|known| known.id == item.id) {
 +        queue.push(item.clone());
-+        store(archive, &queue);
++        store(archive, &queue)?;
 +    }
 +    show(item);
++    Ok(())
 +}
 +
-+/// Drops a message that was to be sent later, with its copies.
-+pub fn cancel(archive: &Archive, state: &Path, id: u64) {
++/// Drops a message that was to be sent later, with its copies. One no longer
++/// queued is either still being copied, and is dropped once it is, or already
++/// on its way, and keeps its files for the send.
++pub fn cancel(archive: &Archive, state: &Path, id: u64) -> Result<(), String> {
 +    let mut queue = stored(archive);
 +    let before = queue.len();
 +    queue.retain(|item| item.id != id);
-+    if queue.len() != before {
-+        store(archive, &queue);
++    if queue.len() == before {
++        cancelled().push(id);
++    } else {
++        store(archive, &queue)?;
++        discard(state, id);
 +    }
-+    discard(state, id);
 +    hide(id);
++    Ok(())
 +}
 +
-+/// Takes the messages due by `now` out of the queue, oldest first.
++/// Takes the messages due by `now` out of the queue, oldest first. Nothing
++/// is due while the queue cannot be saved without them, so none goes twice.
 +pub fn take_due(archive: &Archive, now: i64) -> Vec<Scheduled> {
 +    let queue = stored(archive);
 +    if !queue.iter().any(|item| item.at <= now) {
 +        return Vec::new();
 +    }
 +    let (mut due, rest): (Vec<_>, Vec<_>) = queue.into_iter().partition(|item| item.at <= now);
-+    store(archive, &rest);
++    if let Err(error) = store(archive, &rest) {
++        log::warn!("{error}; the due scheduled messages wait");
++        return Vec::new();
++    }
 +    for item in &due {
 +        hide(item.id);
 +    }
@@ -725,7 +844,7 @@ index 0000000..0a4706b
 +        let files = keep(
 +            state.path(),
 +            42,
-+            vec![
++            &[
 +                Attachment::File {
 +                    path: song.clone(),
 +                    document: false,
@@ -754,13 +873,14 @@ index 0000000..0a4706b
 +        assert_eq!(picture.get_pixel(1, 0).0, [0, 0, 255, 128]);
 +
 +        let archive = Archive::in_memory().unwrap();
-+        let mut item = Scheduled::new("1@s.whatsapp.net".into(), String::new(), Vec::new(), 0);
++        let mut item = Scheduled::new("kept-copies@s.whatsapp.net".into(), String::new(), Vec::new(), 0);
 +        item.id = 42;
 +        item.files = files;
-+        add(&archive, item);
-+        cancel(&archive, state.path(), 42);
++        add(&archive, item).unwrap();
++        cancel(&archive, state.path(), 42).unwrap();
 +        assert!(stored(&archive).is_empty());
 +        assert!(!files_dir(state.path(), 42).exists());
++        assert!(for_chat("kept-copies@s.whatsapp.net").is_empty());
 +    }
 +
 +    #[test]
@@ -770,12 +890,51 @@ index 0000000..0a4706b
 +        let kept = keep(
 +            state.path(),
 +            9,
-+            vec![Attachment::File {
++            &[Attachment::File {
 +                path: missing,
 +                document: false,
 +            }],
 +        );
 +        assert!(kept.unwrap_err().contains("gone.mp3"));
++        let short = keep(
++            state.path(),
++            10,
++            &[Attachment::Picture {
++                width: 2,
++                height: 2,
++                rgba: vec![0; 3],
++            }],
++        );
++        assert!(short.is_err(), "a picture missing pixels is refused, not encoded");
++    }
++
++    #[test]
++    fn a_cancel_while_copying_drops_the_message_once_copied() {
++        let archive = Archive::in_memory().unwrap();
++        let state = tempfile::tempdir().unwrap();
++        std::fs::create_dir_all(files_dir(state.path(), 77)).unwrap();
++        // Not queued yet: the copy is still being made.
++        cancel(&archive, state.path(), 77).unwrap();
++        assert!(files_dir(state.path(), 77).exists(), "the copy in progress is left to finish");
++        assert!(was_cancelled(77));
++        assert!(!was_cancelled(77), "the cancel is consumed once");
++    }
++
++    #[test]
++    fn due_messages_leave_the_queue_once() {
++        let archive = Archive::in_memory().unwrap();
++        let chat = "due-once@s.whatsapp.net";
++        let mut early = Scheduled::new(chat.into(), "early".into(), Vec::new(), 100);
++        early.id = 1;
++        let mut late = Scheduled::new(chat.into(), "late".into(), Vec::new(), 300);
++        late.id = 2;
++        add(&archive, late).unwrap();
++        add(&archive, early).unwrap();
++        let due = take_due(&archive, 200);
++        assert_eq!(due.iter().map(|item| item.id).collect::<Vec<_>>(), [1]);
++        assert!(take_due(&archive, 200).is_empty());
++        assert_eq!(for_chat(chat).iter().map(|item| item.id).collect::<Vec<_>>(), [2]);
++        cancel(&archive, Path::new("unused"), 2).unwrap();
 +    }
 +
 +    #[test]
@@ -785,7 +944,7 @@ index 0000000..0a4706b
 +            std::fs::create_dir_all(files_dir(state.path(), id)).unwrap();
 +        }
 +        mark_sent(state.path(), 3);
-+        let mut queued = Scheduled::new("1@s.whatsapp.net".into(), String::new(), Vec::new(), 0);
++        let mut queued = Scheduled::new("swept@s.whatsapp.net".into(), String::new(), Vec::new(), 0);
 +        queued.id = 1;
 +        let later = SystemTime::now() + KEEP_SENT + Duration::from_secs(60);
 +        sweep(state.path(), &[queued.clone()], SystemTime::now());
@@ -827,7 +986,7 @@ index 0000000..0a4706b
 +    }
 +}
 diff --git a/src/ui/attachment_preview.rs b/src/ui/attachment_preview.rs
-index 34b3059..2b52b7a 100644
+index 34b3059..0ebc086 100644
 --- a/src/ui/attachment_preview.rs
 +++ b/src/ui/attachment_preview.rs
 @@ -161,7 +161,7 @@ pub fn bar(app: &mut App, ui: &mut egui::Ui) -> bool {
@@ -839,7 +998,7 @@ index 34b3059..2b52b7a 100644
                      ui,
                      Icon::Send,
                      44.0,
-@@ -170,8 +170,18 @@ pub fn bar(app: &mut App, ui: &mut egui::Ui) -> bool {
+@@ -170,8 +170,21 @@ pub fn bar(app: &mut App, ui: &mut egui::Ui) -> bool {
                      palette.on_accent,
                      "Send",
                  )
@@ -853,6 +1012,9 @@ index 34b3059..2b52b7a 100644
 +                    && app.reply_to.is_none()
 +                    && !app.pending_view_once
 +                {
++                    if button.secondary_clicked() {
++                        super::conversation::reset_schedule_day(ui.ctx());
++                    }
 +                    egui::Popup::context_menu(&button)
 +                        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
 +                        .show(|ui| super::conversation::schedule_menu(app, ui, &chat));
@@ -861,7 +1023,7 @@ index 34b3059..2b52b7a 100644
          });
      if let Some(index) = remove {
 diff --git a/src/ui/conversation.rs b/src/ui/conversation.rs
-index c436952..d42f0a0 100644
+index c436952..e87189c 100644
 --- a/src/ui/conversation.rs
 +++ b/src/ui/conversation.rs
 @@ -1615,6 +1615,7 @@ fn composer(app: &mut App, ui: &mut egui::Ui, chat: &Chat, review_send: Option<b
@@ -872,7 +1034,7 @@ index c436952..d42f0a0 100644
              if app.editing.is_some() {
                  edit_strip(app, ui);
              } else if let Some(reply_id) = app.reply_to.clone() {
-@@ -2100,12 +2101,19 @@ fn composer(app: &mut App, ui: &mut egui::Ui, chat: &Chat, review_send: Option<b
+@@ -2100,12 +2101,22 @@ fn composer(app: &mut App, ui: &mut egui::Ui, chat: &Chat, review_send: Option<b
                      } else {
                          Icon::Send
                      };
@@ -888,6 +1050,9 @@ index c436952..d42f0a0 100644
                      }
 +                    // Patched build: right-click Send to send the text later.
 +                    if app.editing.is_none() && app.pending.is_empty() && app.reply_to.is_none() {
++                        if send.secondary_clicked() {
++                            reset_schedule_day(ui.ctx());
++                        }
 +                        // Stays open while a time is typed; choosing closes it.
 +                        egui::Popup::context_menu(&send)
 +                            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
@@ -896,7 +1061,7 @@ index c436952..d42f0a0 100644
                  });
                  }
              },
-@@ -2480,6 +2488,125 @@ fn upload_strips(app: &mut App, ui: &mut egui::Ui, chat: &str) {
+@@ -2480,6 +2491,129 @@ fn upload_strips(app: &mut App, ui: &mut egui::Ui, chat: &str) {
      }
  }
  
@@ -944,6 +1109,11 @@ index c436952..d42f0a0 100644
 +        }
 +    });
 +    strip_gap(ui);
++}
++
++/// Patched build: a Send-later menu opened anew starts on today.
++pub(super) fn reset_schedule_day(ctx: &egui::Context) {
++    ctx.data_mut(|data| data.remove::<i64>(egui::Id::new("schedule-day")));
 +}
 +
 +/// Patched build: the Send button's right-click menu, which sends the
@@ -1011,7 +1181,6 @@ index c436952..d42f0a0 100644
 +    });
 +    ui.data_mut(|data| data.insert_temp(id, custom));
 +    if let Some(at) = chosen {
-+        ui.data_mut(|data| data.remove::<i64>(day_id));
 +        let text = std::mem::take(&mut app.composer);
 +        app.schedule_text(chat.to_owned(), text, at);
 +        app.focus_composer = true;
