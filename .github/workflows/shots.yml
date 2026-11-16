@@ -1,0 +1,31 @@
+name: shots
+on: push
+jobs:
+  shot:
+    runs-on: macos-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        ref: [shots-before, format-as-you-type]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: Goodly58/zapfast-contrib
+          ref: ${{ matrix.ref }}
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build the demo
+        run: cargo build --locked --features demo
+      - name: Screenshots
+        timeout-minutes: 5
+        run: |
+          for page in composer-markup composer-markup,light; do
+            name="${{ matrix.ref }}-${page/,/-}"
+            target/debug/zapfast --demo-page "$page" --demo-size 1000x640 \
+              --demo-shot "$RUNNER_TEMP/$name.png" --demo-shot-delay 5000
+          done
+          ls -la "$RUNNER_TEMP"/*.png
+      - uses: actions/upload-artifact@v4
+        with:
+          name: shots-${{ matrix.ref }}
+          path: ${{ runner.temp }}/*.png
