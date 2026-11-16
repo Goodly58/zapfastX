@@ -14,17 +14,23 @@ jobs:
           repository: Goodly58/zapfast-contrib
           ref: ${{ matrix.ref }}
       - uses: dtolnay/rust-toolchain@stable
+      # Screenshot only, never committed: demo parts for the dark theme and a
+      # 2x interface zoom.
+      - name: Dark and zoom demo parts
+        run: |
+          perl -0pi -e 's/("light" => \{\n\s*app\.settings\.theme = ThemeChoice::Light;\n\s*\})/$1\n            "dark" => { app.settings.theme = ThemeChoice::Dark; }\n            "zoom2" => { app.settings.zoom = 2.0; }/' src/demo.rs
+          grep -n '"dark" =>\|"zoom2" =>' src/demo.rs
       - name: Build the demo
         run: cargo build --locked --features demo
       - name: Screenshots
         timeout-minutes: 5
         run: |
-          for page in composer-markup composer-markup,light; do
-            name="${{ matrix.ref }}-${page/,/-}"
-            target/debug/zapfast --demo-page "$page" --demo-size 1000x640 \
-              --demo-shot "$RUNNER_TEMP/$name.png" --demo-shot-delay 5000
+          for theme in light dark; do
+            target/debug/zapfast --demo-page "composer-markup,$theme,zoom2" --demo-size 1600x1000 \
+              --demo-shot "$RUNNER_TEMP/${{ matrix.ref }}-$theme.png" --demo-shot-delay 5000
           done
           ls -la "$RUNNER_TEMP"/*.png
+          sips -g pixelWidth -g pixelHeight "$RUNNER_TEMP"/*.png
       - uses: actions/upload-artifact@v4
         with:
           name: shots-${{ matrix.ref }}
