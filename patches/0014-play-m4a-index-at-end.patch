@@ -1,0 +1,88 @@
+diff --git a/src/audio.rs b/src/audio.rs
+index 85ab1ae..97435e6 100644
+--- a/src/audio.rs
++++ b/src/audio.rs
+@@ -621,7 +621,9 @@ fn decode_file(path: &Path) -> Result<Vec<f32>, String> {
+     }
+     let file =
+         std::fs::File::open(path).map_err(|error| format!("Could not read the audio: {error}"))?;
+-    let decoder = rodio::Decoder::new(std::io::BufReader::new(file))
++    // From a file, so the decoder knows its length and may seek: an M4A whose
++    // index (moov) follows its audio, as many recorders write it, needs both.
++    let decoder = rodio::Decoder::try_from(file)
+         .map_err(|error| format!("Could not decode the audio: {error}"))?;
+     let channels = decoder.channels().get();
+     let rate = decoder.sample_rate().get();
+@@ -1588,4 +1590,25 @@ mod tests {
+         );
+         assert!(levels.len() >= 15, "{}", levels.len());
+     }
++
++    /// An M4A whose index (moov) follows its audio, as many recorders and
++    /// ffmpeg write one, decodes: the decoder seeks to the index.
++    #[test]
++    fn an_m4a_with_its_index_after_the_audio_decodes() {
++        let path = Path::new(concat!(
++            env!("CARGO_MANIFEST_DIR"),
++            "/tests/fixtures/audio/index-at-end.m4a"
++        ));
++        let bytes = std::fs::read(path).expect("fixture");
++        let at = |atom: &[u8]| bytes.windows(4).position(|window| window == atom);
++        assert!(
++            at(b"moov") > at(b"mdat"),
++            "the fixture keeps its index last"
++        );
++        let samples = decode_file(path).expect("decodes");
++        // Half a second of a 440 Hz tone, give or take the encoder's padding.
++        let seconds = samples.len() as f64 / f64::from(voice::RATE);
++        assert!((0.4..0.7).contains(&seconds), "{seconds}");
++        assert!(samples.iter().any(|sample| sample.abs() > 0.05));
++    }
+ }
+diff --git a/tests/fixtures/audio/index-at-end.m4a b/tests/fixtures/audio/index-at-end.m4a
+new file mode 100644
+index 0000000000000000000000000000000000000000..307fb7ee644142f40697c9519f02730226d7dd19
+GIT binary patch
+literal 2424
+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
+
+literal 0
+HcmV?d00001
+
