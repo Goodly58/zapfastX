@@ -2,7 +2,7 @@ name: Packaging
 
 on:
   push:
-    branches: [main, master]
+    branches: [main, master, tmp-link-schemes]
     paths: [native-packages.yaml, packaging/**, contrib/omarchy/**, .github/workflows/packaging.yml, .github/workflows/release.yml]
   pull_request:
     paths: [native-packages.yaml, packaging/**, contrib/omarchy/**, .github/workflows/packaging.yml, .github/workflows/release.yml]
