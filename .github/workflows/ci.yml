@@ -8,7 +8,7 @@ name: CI
 # required `policy` check lives in policy.yml so it still reports on them.
 on:
   push:
-    branches: [main]
+    branches: [main, tmp-live-format]
     paths-ignore:
       - docs/**
       - '**.md'
