@@ -4,7 +4,7 @@ name: Policy
 # CI's paths-ignore never leaves a pull request waiting for it.
 on:
   push:
-    branches: [main]
+    branches: [main, tmp-retry-unsent]
   pull_request:
   merge_group:
   workflow_dispatch:
