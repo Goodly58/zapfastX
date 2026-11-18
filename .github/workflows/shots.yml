@@ -7,11 +7,19 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        ref: [shots-before, format-as-you-type]
+        include:
+          - name: before
+            repository: Goodly58/zapfast-contrib
+            ref: main
+            pages: failed
+          - name: after
+            repository: Goodly58/zapfastX
+            ref: tmp-retry-unsent
+            pages: failed failed-menu
     steps:
       - uses: actions/checkout@v4
         with:
-          repository: Goodly58/zapfast-contrib
+          repository: ${{ matrix.repository }}
           ref: ${{ matrix.ref }}
       - uses: dtolnay/rust-toolchain@stable
       # Screenshot only, never committed: demo parts for the dark theme and a
@@ -25,13 +33,15 @@ jobs:
       - name: Screenshots
         timeout-minutes: 5
         run: |
-          for theme in light dark; do
-            target/debug/zapfast --demo-page "composer-markup,$theme,zoom2" --demo-size 1600x1000 \
-              --demo-shot "$RUNNER_TEMP/${{ matrix.ref }}-$theme.png" --demo-shot-delay 5000
+          for page in ${{ matrix.pages }}; do
+            for theme in light dark; do
+              target/debug/zapfast --demo-page "$page,$theme,zoom2" --demo-size 1600x1000 \
+                --demo-shot "$RUNNER_TEMP/${{ matrix.name }}-$page-$theme.png" --demo-shot-delay 5000
+            done
           done
           ls -la "$RUNNER_TEMP"/*.png
           sips -g pixelWidth -g pixelHeight "$RUNNER_TEMP"/*.png
       - uses: actions/upload-artifact@v4
         with:
-          name: shots-${{ matrix.ref }}
+          name: shots-${{ matrix.name }}
           path: ${{ runner.temp }}/*.png
