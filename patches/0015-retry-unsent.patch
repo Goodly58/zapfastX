@@ -168,55 +168,61 @@ index 291efa8..d84c163 100644
      pub(crate) fn reject_message(archive: &super::Archive, id: &str) {
          archive
 diff --git a/src/archive/receipts.rs b/src/archive/receipts.rs
-index 0c9542f..a94628c 100644
+index 0c9542f..ae24de6 100644
 --- a/src/archive/receipts.rs
 +++ b/src/archive/receipts.rs
-@@ -130,7 +130,21 @@ impl Archive {
+@@ -130,7 +130,24 @@ impl Archive {
          )?;
          let aggregate = status_from_rank(rank.unwrap_or(0));
          let now = crate::util::now();
 -        let mut changed = false;
-+        // One member's receipt proves a message marked not sent went out,
-+        // though its ticks wait for the least advanced member.
++        // A receipt from one member of the saved audience proves a message
++        // still sending, or marked not sent, went out, though its ticks wait
++        // for the least advanced member. A send saves its audience first.
 +        let lifted = transaction.execute(
-+            "UPDATE messages SET status = ?3 WHERE chat = ?1 AND id = ?2 AND status = ?4
++            "UPDATE messages SET status = ?3
++             WHERE chat = ?1 AND id = ?2 AND status IN (?4, ?6)
 +             AND EXISTS (SELECT 1 FROM group_receipts
-+                 WHERE chat = ?1 AND id = ?2 AND status >= ?5)",
++                 WHERE chat = ?1 AND id = ?2 AND expected = 1 AND status >= ?5)",
 +            params![
 +                chat,
 +                id,
 +                status_rank(Delivery::Sent),
 +                status_rank(Delivery::Failed),
-+                status_rank(Delivery::Delivered)
++                status_rank(Delivery::Delivered),
++                status_rank(Delivery::Pending)
 +            ],
 +        )?;
 +        let mut changed = lifted > 0;
          if aggregate >= Delivery::Delivered {
              changed |=
                  self.set_status(chat, id, Delivery::Delivered, delivered_at.unwrap_or(now))?;
-@@ -495,6 +509,27 @@ mod tests {
+@@ -495,6 +512,30 @@ mod tests {
          );
      }
  
 +    #[test]
-+    fn one_members_receipt_shows_a_group_message_marked_not_sent_went_out() {
-+        let archive = Archive::in_memory().unwrap();
++    fn one_members_receipt_shows_a_group_message_went_out() {
 +        let chat = "120363000000000001@g.us";
 +        let (a, b) = ("a@s.whatsapp.net", "b@s.whatsapp.net");
-+        let mut row = super::super::tests::message(chat, "m", 100, true);
-+        row.status = Delivery::Failed;
-+        archive.insert_message(&row, None).unwrap();
-+        archive
-+            .snapshot_group_recipients(chat, "m", &[a.into(), b.into()])
-+            .unwrap();
-+        let status = || archive.message(chat, "m").unwrap().unwrap().status;
 +        let delivered = Delivery::Delivered;
++        // Still sending, or marked not sent.
++        for start in [Delivery::Pending, Delivery::Failed] {
++            let archive = Archive::in_memory().unwrap();
++            let mut row = super::super::tests::message(chat, "m", 100, true);
++            row.status = start;
++            archive.insert_message(&row, None).unwrap();
++            archive
++                .snapshot_group_recipients(chat, "m", &[a.into(), b.into()])
++                .unwrap();
++            let status = || archive.message(chat, "m").unwrap().unwrap().status;
 +
-+        let changed = archive.group_receipt(chat, "m", a, delivered, 1);
-+        assert!(changed.unwrap(), "the transcript is told");
-+        assert_eq!(status(), Delivery::Sent, "the ticks wait for b");
-+        archive.group_receipt(chat, "m", b, delivered, 2).unwrap();
-+        assert_eq!(status(), Delivery::Delivered);
++            let changed = archive.group_receipt(chat, "m", a, delivered, 1);
++            assert!(changed.unwrap(), "the transcript is told");
++            assert_eq!(status(), Delivery::Sent, "the ticks wait for b");
++            archive.group_receipt(chat, "m", b, delivered, 2).unwrap();
++            assert_eq!(status(), Delivery::Delivered);
++        }
 +    }
 +
      #[test]
@@ -539,7 +545,7 @@ index 96d9de3..2768d98 100644
      MessageDeletedForMe {
          generation: u64,
 diff --git a/src/backend/worker.rs b/src/backend/worker.rs
-index 18e5e9f..a4416c8 100644
+index 18e5e9f..f52afbc 100644
 --- a/src/backend/worker.rs
 +++ b/src/backend/worker.rs
 @@ -918,6 +918,12 @@ pub async fn run(
@@ -981,7 +987,7 @@ index 18e5e9f..a4416c8 100644
      #[test]
      fn history_receipts_date_direct_ticks_and_fill_group_message_info() {
          use wa::web_message_info::Status;
-@@ -24115,6 +24441,54 @@ mod receipt_tests {
+@@ -24115,6 +24441,85 @@ mod receipt_tests {
          );
      }
  
@@ -1031,6 +1037,37 @@ index 18e5e9f..a4416c8 100644
 +
 +        // It went out, so it offers no Retry that would move it again.
 +        assert_eq!(own_status(&worker, "mine"), Delivery::Sent);
++    }
++
++    #[tokio::test]
++    async fn a_group_receipt_before_a_send_error_leaves_the_message_sent() {
++        let (mut worker, _events, _inbox, _wa) = worker();
++        let group = "120363000000000001@g.us";
++        let (a, b) = ("a@s.whatsapp.net", "b@s.whatsapp.net");
++        let pending = Message {
++            chat: group.into(),
++            status: Delivery::Pending,
++            ..own_message("mine", 200)
++        };
++        worker.store_message(pending, None, None);
++        let archive = &worker.archive;
++        archive
++            .snapshot_group_recipients(group, "mine", &[a.into(), b.into()])
++            .expect("snapshot");
++        archive
++            .group_receipt(group, "mine", a, Delivery::Delivered, 150)
++            .expect("receipt");
++        worker
++            .handle_command(Command::Sent {
++                chat: group.into(),
++                id: "mine".into(),
++                error: Some("timed out".into()),
++            })
++            .await;
++
++        // a has it, though b's tick is still awaited.
++        let stored = worker.archive.message(group, "mine").expect("read");
++        assert_eq!(stored.expect("stored").status, Delivery::Sent);
 +    }
 +
      #[test]
