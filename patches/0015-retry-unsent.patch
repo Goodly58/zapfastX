@@ -1,0 +1,1426 @@
+diff --git a/src/app.rs b/src/app.rs
+index 654c49a..f802b20 100644
+--- a/src/app.rs
++++ b/src/app.rs
+@@ -7474,7 +7474,8 @@ impl App {
+             | Action::ReplyInteractive { chat, .. }
+             | Action::CreatePoll { chat, .. }
+             | Action::VotePoll { chat, .. }
+-            | Action::React { chat, .. } => Some(chat.as_str()),
++            | Action::React { chat, .. }
++            | Action::Resend { chat, .. } => Some(chat.as_str()),
+             Action::SendPending { account, chat, .. } if account == &self.account().id => {
+                 Some(chat.as_str())
+             }
+@@ -8528,6 +8529,9 @@ impl App {
+                 // `Event::MessageDeleted` removes it and prunes the selection.
+                 self.backend.send(Command::DeleteLocal { chat, id });
+             }
++            Action::Resend { chat, id } => {
++                self.backend.send(Command::Resend { chat, id });
++            }
+             Action::Attach { documents } => {
+                 if let Some(chat) = self.open_chat.clone() {
+                     self.backend.send(Command::PickFiles { chat, documents });
+diff --git a/src/archive.rs b/src/archive.rs
+index 291efa8..d84c163 100644
+--- a/src/archive.rs
++++ b/src/archive.rs
+@@ -30,6 +30,7 @@ mod receipts;
+ mod reconcile;
+ #[cfg(test)]
+ mod reconcile_tests;
++mod sending;
+ mod stars;
+ mod stickers;
+ pub use polls::PollVote;
+@@ -579,6 +580,7 @@ impl Archive {
+         connection.execute_batch(favorites::SCHEMA)?;
+         connection.execute_batch(stars::SCHEMA)?;
+         connection.execute_batch(pins::SCHEMA)?;
++        connection.execute_batch(sending::SCHEMA)?;
+         for (table, column, definition) in MIGRATIONS {
+             let exists = connection
+                 .prepare(&format!("PRAGMA table_info({table})"))?
+@@ -1323,6 +1325,8 @@ impl Archive {
+             params![lid_chat, phone_chat],
+         )?;
+         let copies = self.duplicate_copies(&lid_chat, &phone_chat)?;
++        // Of two copies of a message, a failed one gives way to one that was
++        // sent.
+         transaction.execute(
+             "INSERT INTO messages (chat, id, sender, sender_name, from_me, timestamp, content, status, quoted, reactions, edited, raw, thumbnail, mentions, forwarded, delivered_at, read_at, history_order, broadcast_list)
+              SELECT ?2, id, sender, sender_name, from_me, timestamp, content, status, quoted, reactions, edited, raw, thumbnail, mentions, forwarded, delivered_at, read_at, history_order, broadcast_list
+@@ -1331,7 +1335,11 @@ impl Archive {
+              ON CONFLICT(chat, id) DO UPDATE SET
+                 content = CASE WHEN excluded.edited > messages.edited THEN excluded.content ELSE messages.content END,
+                 sender_name = COALESCE(messages.sender_name, excluded.sender_name),
+-                status = MAX(messages.status, excluded.status),
++                status = CASE
++                    WHEN messages.status = ?3 AND excluded.status >= ?4 THEN excluded.status
++                    WHEN excluded.status = ?3 AND messages.status >= ?4 THEN messages.status
++                    ELSE MAX(messages.status, excluded.status)
++                END,
+                 quoted = COALESCE(messages.quoted, excluded.quoted),
+                 reactions = CASE WHEN messages.reactions = '[]' THEN excluded.reactions ELSE messages.reactions END,
+                 edited = MAX(messages.edited, excluded.edited),
+@@ -1344,9 +1352,15 @@ impl Archive {
+                 read_at = COALESCE(messages.read_at, excluded.read_at),
+                 history_order = COALESCE(messages.history_order, excluded.history_order),
+                 broadcast_list = COALESCE(messages.broadcast_list, excluded.broadcast_list)",
+-            params![lid_chat, phone_chat],
++            params![
++                lid_chat,
++                phone_chat,
++                status_rank(Delivery::Failed),
++                status_rank(Delivery::Sent)
++            ],
+         )?;
+         Self::move_message_metadata(&transaction, &lid_chat, &phone_chat)?;
++        Self::move_sending(&transaction, &lid_chat, &phone_chat)?;
+         self.settle_duplicates(&phone_chat, copies, Reactions::Kept)?;
+         transaction.execute(
+             "INSERT OR IGNORE INTO polls (chat, id, creator, secret) SELECT ?2, id, creator, secret FROM polls WHERE chat = ?1",
+@@ -1655,6 +1669,7 @@ impl Archive {
+                 sender_name = COALESCE(excluded.sender_name, sender_name),
+                 content = excluded.content,
+                 status = CASE
++                    WHEN messages.status = ?18 AND excluded.status >= ?20 THEN excluded.status
+                     WHEN messages.status > excluded.status AND excluded.status <> ?18
+                     THEN messages.status
+                     ELSE excluded.status
+@@ -1695,6 +1710,8 @@ impl Archive {
+                 // An explicit failure still writes over a further state.
+                 status_rank(Delivery::Failed),
+                 message.history_order,
++                // A copy that was sent moves a failed message on.
++                status_rank(Delivery::Sent),
+             ],
+         )?;
+         if matches!(message.content, Content::Image { motion: None, .. }) {
+@@ -2632,9 +2649,12 @@ impl Archive {
+     }
+ 
+     /// Advances delivery state, except that `Failed` may replace it. Stores the
+-    /// first timestamp for each delivery stage.
++    /// first timestamp for each delivery stage. Being sent or a receipt also
++    /// moves a failed message on: it proves the message went out after all.
+     pub fn set_status(&self, chat: &str, id: &str, status: Delivery, at: i64) -> Result<bool> {
+         let rank = status_rank(status);
++        let failed = status_rank(Delivery::Failed);
++        let advances = status >= Delivery::Sent;
+         let changed = if status == Delivery::Failed {
+             self.connection.execute(
+                 "UPDATE messages SET status = ?3 WHERE chat = ?1 AND id = ?2",
+@@ -2644,14 +2664,15 @@ impl Archive {
+             self.connection.execute(
+                 &format!(
+                     "UPDATE messages SET status = ?3, {column} = COALESCE({column}, ?4)
+-                     WHERE chat = ?1 AND id = ?2 AND status < ?3"
++                     WHERE chat = ?1 AND id = ?2 AND (status < ?3 OR (?6 AND status = ?5))"
+                 ),
+-                params![chat, id, rank, at],
++                params![chat, id, rank, at, failed, advances],
+             )?
+         } else {
+             self.connection.execute(
+-                "UPDATE messages SET status = ?3 WHERE chat = ?1 AND id = ?2 AND status < ?3",
+-                params![chat, id, rank],
++                "UPDATE messages SET status = ?3
++                 WHERE chat = ?1 AND id = ?2 AND (status < ?3 OR (?5 AND status = ?4))",
++                params![chat, id, rank, failed, advances],
+             )?
+         };
+         Ok(changed > 0)
+@@ -2958,13 +2979,33 @@ impl Archive {
+     /// Clears all archived data during unlinking.
+     pub fn clear(&self) -> Result<()> {
+         self.connection.execute_batch(
+-            "DELETE FROM poll_history; DELETE FROM poll_votes; DELETE FROM polls; DELETE FROM group_receipts; DELETE FROM messages; DELETE FROM stars; DELETE FROM motion_clips; DELETE FROM chats; DELETE FROM chat_removals; DELETE FROM message_removals; DELETE FROM pending_message_removals; DELETE FROM contacts; DELETE FROM meta; DELETE FROM lids; DELETE FROM drafts; DELETE FROM local_chat_labels; DELETE FROM local_labels; DELETE FROM removed_recent_stickers; DELETE FROM favorite_stickers; DELETE FROM favorites; DELETE FROM favorite_changes;",
++            "DELETE FROM poll_history; DELETE FROM poll_votes; DELETE FROM polls; DELETE FROM group_receipts; DELETE FROM messages; DELETE FROM stars; DELETE FROM motion_clips; DELETE FROM chats; DELETE FROM chat_removals; DELETE FROM message_removals; DELETE FROM pending_message_removals; DELETE FROM contacts; DELETE FROM meta; DELETE FROM lids; DELETE FROM drafts; DELETE FROM local_chat_labels; DELETE FROM local_labels; DELETE FROM removed_recent_stickers; DELETE FROM favorite_stickers; DELETE FROM favorites; DELETE FROM favorite_changes; DELETE FROM sending;",
+         )
+     }
+ }
+ 
+ #[cfg(test)]
+ pub(crate) mod tests {
++    /// Makes changing the status of message `id` fail, as a full disk would,
++    /// until [`accept_status`].
++    pub(crate) fn reject_status(archive: &super::Archive, id: &str) {
++        archive
++            .connection
++            .execute_batch(&format!(
++                "CREATE TRIGGER reject_status BEFORE UPDATE OF status ON messages WHEN NEW.id = '{id}'
++                 BEGIN SELECT RAISE(ABORT, 'fixture failure'); END;"
++            ))
++            .unwrap();
++    }
++
++    /// Undoes [`reject_status`].
++    pub(crate) fn accept_status(archive: &super::Archive) {
++        archive
++            .connection
++            .execute_batch("DROP TRIGGER reject_status;")
++            .unwrap();
++    }
++
+     /// Makes filing the message `id` fail, as a full disk would.
+     pub(crate) fn reject_message(archive: &super::Archive, id: &str) {
+         archive
+diff --git a/src/archive/receipts.rs b/src/archive/receipts.rs
+index 0c9542f..a94628c 100644
+--- a/src/archive/receipts.rs
++++ b/src/archive/receipts.rs
+@@ -130,7 +130,21 @@ impl Archive {
+         )?;
+         let aggregate = status_from_rank(rank.unwrap_or(0));
+         let now = crate::util::now();
+-        let mut changed = false;
++        // One member's receipt proves a message marked not sent went out,
++        // though its ticks wait for the least advanced member.
++        let lifted = transaction.execute(
++            "UPDATE messages SET status = ?3 WHERE chat = ?1 AND id = ?2 AND status = ?4
++             AND EXISTS (SELECT 1 FROM group_receipts
++                 WHERE chat = ?1 AND id = ?2 AND status >= ?5)",
++            params![
++                chat,
++                id,
++                status_rank(Delivery::Sent),
++                status_rank(Delivery::Failed),
++                status_rank(Delivery::Delivered)
++            ],
++        )?;
++        let mut changed = lifted > 0;
+         if aggregate >= Delivery::Delivered {
+             changed |=
+                 self.set_status(chat, id, Delivery::Delivered, delivered_at.unwrap_or(now))?;
+@@ -495,6 +509,27 @@ mod tests {
+         );
+     }
+ 
++    #[test]
++    fn one_members_receipt_shows_a_group_message_marked_not_sent_went_out() {
++        let archive = Archive::in_memory().unwrap();
++        let chat = "120363000000000001@g.us";
++        let (a, b) = ("a@s.whatsapp.net", "b@s.whatsapp.net");
++        let mut row = super::super::tests::message(chat, "m", 100, true);
++        row.status = Delivery::Failed;
++        archive.insert_message(&row, None).unwrap();
++        archive
++            .snapshot_group_recipients(chat, "m", &[a.into(), b.into()])
++            .unwrap();
++        let status = || archive.message(chat, "m").unwrap().unwrap().status;
++        let delivered = Delivery::Delivered;
++
++        let changed = archive.group_receipt(chat, "m", a, delivered, 1);
++        assert!(changed.unwrap(), "the transcript is told");
++        assert_eq!(status(), Delivery::Sent, "the ticks wait for b");
++        archive.group_receipt(chat, "m", b, delivered, 2).unwrap();
++        assert_eq!(status(), Delivery::Delivered);
++    }
++
+     #[test]
+     fn waiting_receipts_follow_a_direct_chat_to_its_phone_number() {
+         let archive = Archive::in_memory().unwrap();
+diff --git a/src/archive/sending.rs b/src/archive/sending.rs
+new file mode 100644
+index 0000000..9537525
+--- /dev/null
++++ b/src/archive/sending.rs
+@@ -0,0 +1,294 @@
++//! Sends of ours that are running, so that one cut off can be retried.
++//!
++//! A message we send is filed as pending before it goes out, and only the
++//! running send can move it on. When ZapFast quits during a send, nothing
++//! would: the message would wait as pending for good. Each running send is
++//! noted here until it finishes, so the next start can tell the ones that
++//! were cut off and show them as not sent, ready to be sent again.
++
++use rusqlite::{OptionalExtension, params};
++
++use super::{Archive, Batch, Result, status_rank};
++use crate::model::{Delivery, Message};
++
++pub const SCHEMA: &str = "
++CREATE TABLE IF NOT EXISTS sending (
++    chat TEXT NOT NULL,
++    id TEXT NOT NULL,
++    PRIMARY KEY (chat, id)
++);
++";
++
++impl Archive {
++    /// Stores a message of ours that is about to be sent, noting its send as
++    /// running. Both go in one write: a quit between two would leave the
++    /// message pending with no note, never to be offered again.
++    pub fn insert_sending(&self, message: &Message, raw: Option<&[u8]>) -> Result<()> {
++        let transaction = Batch::begin(&self.connection)?;
++        self.insert_message(message, raw)?;
++        transaction.execute(
++            "INSERT OR IGNORE INTO sending (chat, id) VALUES (?1, ?2)",
++            params![message.chat, message.id],
++        )?;
++        transaction.commit()
++    }
++
++    /// Forgets a send once it has finished, sent or failed.
++    pub fn sending_finished(&self, chat: &str, id: &str) -> Result<()> {
++        self.connection.execute(
++            "DELETE FROM sending WHERE chat = ?1 AND id = ?2",
++            params![chat, id],
++        )?;
++        Ok(())
++    }
++
++    /// Marks our messages whose send was cut off as failed, and returns how
++    /// many there were. Only for startup, while no send can be running.
++    ///
++    /// Only noted sends count: a message the phone still had pending when
++    /// history was synced is the phone's to send.
++    pub fn fail_cut_off_sends(&self) -> Result<usize> {
++        let transaction = Batch::begin(&self.connection)?;
++        let failed = transaction.execute(
++            "UPDATE messages SET status = ?1
++             WHERE from_me = 1 AND status = ?2 AND EXISTS (
++                 SELECT 1 FROM sending
++                 WHERE sending.chat = messages.chat AND sending.id = messages.id
++             )",
++            params![
++                status_rank(Delivery::Failed),
++                status_rank(Delivery::Pending)
++            ],
++        )?;
++        transaction.execute("DELETE FROM sending", [])?;
++        transaction.commit()?;
++        Ok(failed)
++    }
++
++    /// Moves the notes of a chat's running sends to the chat its messages
++    /// moved to, within that move's transaction.
++    pub(super) fn move_sending(transaction: &Batch<'_>, source: &str, target: &str) -> Result<()> {
++        transaction.execute(
++            "INSERT OR IGNORE INTO sending (chat, id) SELECT ?2, id FROM sending WHERE chat = ?1",
++            params![source, target],
++        )?;
++        transaction.execute("DELETE FROM sending WHERE chat = ?1", params![source])?;
++        Ok(())
++    }
++
++    /// Readies one of our messages that was not sent for another send: it is
++    /// pending again and noted as sending. A group's members that never
++    /// received it are dropped, so the new send's audience replaces them.
++    /// Returns false, changing nothing, unless it is ours and failed.
++    pub fn retry_send(&self, chat: &str, id: &str) -> Result<bool> {
++        let transaction = Batch::begin(&self.connection)?;
++        let failed = transaction
++            .query_row(
++                "SELECT 1 FROM messages
++                 WHERE chat = ?1 AND id = ?2 AND from_me = 1 AND status = ?3",
++                params![chat, id, status_rank(Delivery::Failed)],
++                |_| Ok(()),
++            )
++            .optional()?
++            .is_some();
++        if !failed {
++            return Ok(false);
++        }
++        transaction.execute(
++            "UPDATE messages SET status = ?3 WHERE chat = ?1 AND id = ?2",
++            params![chat, id, status_rank(Delivery::Pending)],
++        )?;
++        transaction.execute(
++            "DELETE FROM group_receipts WHERE chat = ?1 AND id = ?2 AND status = 0",
++            params![chat, id],
++        )?;
++        transaction.execute(
++            "INSERT OR IGNORE INTO sending (chat, id) VALUES (?1, ?2)",
++            params![chat, id],
++        )?;
++        transaction.commit()?;
++        Ok(true)
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use crate::archive::tests::message;
++
++    const GROUP: &str = "120363000000000001@g.us";
++
++    fn status(archive: &Archive, chat: &str, id: &str) -> Delivery {
++        archive
++            .message(chat, id)
++            .expect("read")
++            .expect("stored")
++            .status
++    }
++
++    #[test]
++    fn a_send_cut_off_shows_as_not_sent_at_the_next_start() {
++        let dir = tempfile::tempdir().expect("dir");
++        let path = dir.path().join("archive.db");
++        {
++            let archive = Archive::open_with_key(&path, &[7; 32]).expect("open");
++            for id in ["cut", "finished"] {
++                archive
++                    .insert_sending(&message(GROUP, id, 100, true), None)
++                    .expect("insert");
++            }
++            archive
++                .insert_message(&message(GROUP, "theirs", 100, true), None)
++                .expect("insert");
++            archive
++                .set_status(GROUP, "finished", Delivery::Sent, 101)
++                .expect("sent");
++            archive.sending_finished(GROUP, "finished").expect("done");
++        }
++        let archive = Archive::open_with_key(&path, &[7; 32]).expect("reopen");
++        assert_eq!(archive.fail_cut_off_sends().expect("fail"), 1);
++        assert_eq!(status(&archive, GROUP, "cut"), Delivery::Failed);
++        assert_eq!(status(&archive, GROUP, "finished"), Delivery::Sent);
++        assert_eq!(
++            status(&archive, GROUP, "theirs"),
++            Delivery::Pending,
++            "a pending message no send of ours noted is the phone's"
++        );
++        assert_eq!(
++            archive.fail_cut_off_sends().expect("again"),
++            0,
++            "the notes go with the start that read them"
++        );
++    }
++
++    #[test]
++    fn a_retry_makes_a_failed_message_pending_with_a_fresh_audience() {
++        let archive = Archive::in_memory().expect("opens");
++        archive
++            .insert_message(&message(GROUP, "m", 100, true), None)
++            .expect("insert");
++        archive
++            .snapshot_group_recipients(GROUP, "m", &["a".into(), "b".into()])
++            .expect("audience");
++        archive
++            .group_receipt(GROUP, "m", "a", Delivery::Delivered, 102)
++            .expect("receipt");
++        assert!(
++            !archive.retry_send(GROUP, "m").expect("retry"),
++            "a message still sending is not retried"
++        );
++        archive
++            .set_status(GROUP, "m", Delivery::Failed, 103)
++            .expect("failed");
++
++        assert!(archive.retry_send(GROUP, "m").expect("retry"));
++        assert_eq!(status(&archive, GROUP, "m"), Delivery::Pending);
++        let receipts = archive.receipts(GROUP, "m").expect("receipts");
++        let recipients: Vec<&str> = receipts.iter().map(|r| r.id.as_str()).collect();
++        assert_eq!(
++            recipients,
++            ["a"],
++            "a member who received it stays, one who never did goes"
++        );
++        assert_eq!(archive.fail_cut_off_sends().expect("cut off"), 1);
++        assert_eq!(
++            status(&archive, GROUP, "m"),
++            Delivery::Failed,
++            "the retry is noted as a running send"
++        );
++    }
++
++    #[test]
++    fn a_send_follows_its_chat_to_the_phone_number() {
++        let dir = tempfile::tempdir().expect("dir");
++        let path = dir.path().join("archive.db");
++        {
++            let archive = Archive::open_with_key(&path, &[7; 32]).expect("open");
++            archive.ensure_chat("9@lid", "Fixture").expect("chat");
++            archive
++                .insert_sending(&message("9@lid", "m", 100, true), None)
++                .expect("insert");
++            archive.put_lid("9", "1").expect("mapping");
++        }
++        let archive = Archive::open_with_key(&path, &[7; 32]).expect("reopen");
++        assert_eq!(archive.fail_cut_off_sends().expect("fail"), 1);
++        assert_eq!(status(&archive, "1@s.whatsapp.net", "m"), Delivery::Failed);
++    }
++
++    #[test]
++    fn unlinking_forgets_running_sends() {
++        let archive = Archive::in_memory().expect("opens");
++        archive
++            .insert_sending(&message(GROUP, "m", 100, true), None)
++            .expect("insert");
++        archive.clear().expect("clear");
++        let left: i64 = archive
++            .connection
++            .query_row("SELECT COUNT(*) FROM sending", [], |row| row.get(0))
++            .expect("count");
++        assert_eq!(left, 0);
++    }
++
++    #[test]
++    fn a_send_is_stored_with_its_note_or_not_at_all() {
++        let archive = Archive::in_memory().expect("opens");
++        archive
++            .connection
++            .execute_batch(
++                "CREATE TRIGGER reject_note BEFORE INSERT ON sending
++                 BEGIN SELECT RAISE(ABORT, 'fixture failure'); END;",
++            )
++            .expect("trigger");
++        assert!(
++            archive
++                .insert_sending(&message(GROUP, "m", 100, true), None)
++                .is_err()
++        );
++        assert!(archive.message(GROUP, "m").expect("read").is_none());
++    }
++
++    #[test]
++    fn a_confirmed_copy_lifts_a_send_cut_off() {
++        let archive = Archive::in_memory().expect("opens");
++        let mut copy = message(GROUP, "m", 100, true);
++        archive.insert_sending(&copy, None).expect("insert");
++        archive.fail_cut_off_sends().expect("fail");
++        archive.insert_message(&copy, None).expect("pending copy");
++        assert_eq!(
++            status(&archive, GROUP, "m"),
++            Delivery::Failed,
++            "a pending copy proves nothing"
++        );
++        copy.status = Delivery::Delivered;
++        archive.insert_message(&copy, None).expect("delivered copy");
++        assert_eq!(status(&archive, GROUP, "m"), Delivery::Delivered);
++    }
++
++    #[test]
++    fn merged_copies_keep_the_one_that_was_sent() {
++        for (lid, phone) in [
++            (Delivery::Failed, Delivery::Sent),
++            (Delivery::Sent, Delivery::Failed),
++        ] {
++            let archive = Archive::in_memory().expect("opens");
++            for (chat, state) in [("9@lid", lid), ("1@s.whatsapp.net", phone)] {
++                archive.ensure_chat(chat, "Fixture").expect("chat");
++                let mut copy = message(chat, "m", 100, true);
++                copy.status = state;
++                archive.insert_message(&copy, None).expect("insert");
++            }
++            archive.put_lid("9", "1").expect("mapping");
++            assert_eq!(status(&archive, "1@s.whatsapp.net", "m"), Delivery::Sent);
++        }
++    }
++
++    #[test]
++    fn only_our_failed_messages_are_retried() {
++        let archive = Archive::in_memory().expect("opens");
++        let mut incoming = message(GROUP, "in", 100, false);
++        incoming.status = Delivery::Failed;
++        archive.insert_message(&incoming, None).expect("insert");
++        assert!(!archive.retry_send(GROUP, "in").expect("retry"));
++        assert!(!archive.retry_send(GROUP, "missing").expect("retry"));
++    }
++}
+diff --git a/src/backend.rs b/src/backend.rs
+index 96d9de3..2768d98 100644
+--- a/src/backend.rs
++++ b/src/backend.rs
+@@ -464,6 +464,11 @@ pub enum Command {
+         chat: ChatId,
+         id: String,
+     },
++    /// Sends one of our messages that was not sent again, as it was.
++    Resend {
++        chat: ChatId,
++        id: String,
++    },
+     /// Completion of the account's deletion sync, before removing our copy.
+     MessageDeletedForMe {
+         generation: u64,
+diff --git a/src/backend/worker.rs b/src/backend/worker.rs
+index 18e5e9f..a4416c8 100644
+--- a/src/backend/worker.rs
++++ b/src/backend/worker.rs
+@@ -918,6 +918,12 @@ pub async fn run(
+             }
+         }
+     };
++    // No send runs yet, so one still noted was cut off when ZapFast last quit.
++    match archive.fail_cut_off_sends() {
++        Ok(0) => {}
++        Ok(count) => log::info!("{count} messages cut off while sending are now not sent"),
++        Err(error) => log::warn!("could not find sends cut off at the last quit: {error}"),
++    }
+     let (wa_sender, wa_events) = mpsc::unbounded_channel();
+     let privacy_confirmed = archive
+         .meta("chat_privacy_ready_v1")
+@@ -2451,8 +2457,18 @@ impl Worker {
+         match self.archive.restamp_sent(&chat, &ack.id, at.timestamp()) {
+             Ok(changed) => {
+                 self.awaiting_ack.remove(&ack.id);
+-                if changed {
++                // The server has the message: a quit before its send reports
++                // must not mark it not sent at the next start.
++                let filed = self
++                    .archive
++                    .set_status(&chat, &ack.id, Delivery::Sent, at.timestamp());
++                if filed.is_ok() {
++                    let _ = self.archive.sending_finished(&chat, &ack.id);
++                }
++                if changed || filed.unwrap_or(false) {
+                     self.emit_message(&chat, &ack.id);
++                }
++                if changed {
+                     self.emit_chat(&chat);
+                 }
+             }
+@@ -6117,7 +6133,15 @@ impl Worker {
+             message.content.keep_local_paths(&existing.content);
+             keep_live_location_notice(&mut message.content, existing);
+         }
+-        if let Err(error) = self.archive.insert_message(&message, raw.as_deref()) {
++        // A message of ours about to be sent is stored with a note of its
++        // send, so one cut off can be offered again.
++        let sending = message.from_me && message.status == Delivery::Pending;
++        let stored = if sending {
++            self.archive.insert_sending(&message, raw.as_deref())
++        } else {
++            self.archive.insert_message(&message, raw.as_deref())
++        };
++        if let Err(error) = stored {
+             log::warn!("could not store a message: {error}");
+             return;
+         }
+@@ -6127,7 +6151,7 @@ impl Worker {
+             self.download(chat.clone(), message.id.clone());
+         }
+         // Only a stored message can be moved to the server's time.
+-        if message.from_me && message.status == Delivery::Pending {
++        if sending {
+             self.awaiting_ack.insert(
+                 message.id.clone(),
+                 AwaitingAck::Message(message.chat.clone()),
+@@ -6725,10 +6749,13 @@ impl Worker {
+                 let existing = self.archive.message(&id, &row.id).ok().flatten();
+                 // A transcript already on screen is not paged again, so a
+                 // status history moves forward, such as a voice message the
+-                // phone played, is sent to it.
+-                let status_advanced = existing
+-                    .as_ref()
+-                    .is_some_and(|existing| existing.status < row.status);
++                // phone played, is sent to it. A copy that was sent moves a
++                // message marked not sent on too, as the archive files it.
++                let status_advanced = existing.as_ref().is_some_and(|existing| {
++                    existing.status < row.status
++                        || (existing.status == Delivery::Failed
++                            && (Delivery::Sent..Delivery::Failed).contains(&row.status))
++                });
+                 // What the info panel listed for this row before it lands,
+                 // so a change to its pictures, documents or links is told.
+                 let before = existing.as_ref().map(|existing| existing.content.clone());
+@@ -7345,7 +7372,8 @@ impl Worker {
+             | Command::SendSticker { chat, .. }
+             | Command::SendGif { chat, .. }
+             | Command::SendLocation { chat, .. }
+-            | Command::CreatePoll { chat, .. } => Some(chat),
++            | Command::CreatePoll { chat, .. }
++            | Command::Resend { chat, .. } => Some(chat),
+             // A batch goes to every recipient or to none of them.
+             Command::Forward { to_chats, .. } => to_chats
+                 .iter()
+@@ -7693,6 +7721,7 @@ impl Worker {
+             Command::DeleteLocal { chat, id } => {
+                 self.delete_message_for_me(chat, id);
+             }
++            Command::Resend { chat, id } => self.resend(chat, id),
+             Command::MessageDeletedForMe {
+                 generation,
+                 chat,
+@@ -9126,6 +9155,19 @@ impl Worker {
+                     }
+                     return;
+                 }
++                // A phone number learned during the send moved the message,
++                // and the note of its send, out of the privacy id's chat.
++                let chat = self.canonical_str(&chat);
++                let error = match error {
++                    // The server acknowledged the message, so it went out: it
++                    // is not marked not sent, as a retry would only move it
++                    // down the chat.
++                    Some(error) if self.went_out(&chat, &id) => {
++                        log::warn!("an acknowledged message reported an error: {error}");
++                        None
++                    }
++                    error => error,
++                };
+                 let status = match &error {
+                     Some(_) => Delivery::Failed,
+                     None => Delivery::Sent,
+@@ -9134,9 +9176,15 @@ impl Worker {
+                     // A failed send is never acked; a retry stores the row again.
+                     self.awaiting_ack.remove(&id);
+                 }
+-                let _ = self
++                // The note goes only once the outcome is filed: a message
++                // left pending without it would never be offered again.
++                if self
+                     .archive
+-                    .set_status(&chat, &id, status, crate::util::now());
++                    .set_status(&chat, &id, status, crate::util::now())
++                    .is_ok()
++                {
++                    let _ = self.archive.sending_finished(&chat, &id);
++                }
+                 self.emit_message(&chat, &id);
+                 self.emit_chat(&chat);
+                 self.advance_serial_forward(&id);
+@@ -9830,6 +9878,72 @@ impl Worker {
+         }));
+     }
+ 
++    /// Sends one of our messages that was not sent again, as it was filed:
++    /// the stored message keeps its quote, mentions and preview, and its id,
++    /// so a first attempt that did arrive is not delivered twice.
++    fn resend(&mut self, chat: ChatId, id: String) {
++        let Some(client) = self.connected_client() else {
++            self.emit(Event::Error(
++                "Not connected to WhatsApp: the message was not sent again".to_owned(),
++            ));
++            return;
++        };
++        let Some(jid) = Self::jid_of(&chat) else {
++            return;
++        };
++        let Some((message, expiration)) = self.stored_send(&chat, &id) else {
++            self.emit(Event::Error(
++                "This message cannot be sent again: send it as a new message".to_owned(),
++            ));
++            return;
++        };
++        match self.archive.retry_send(&chat, &id) {
++            Ok(true) => {}
++            // Sent or removed meanwhile: there is nothing to retry.
++            Ok(false) => return,
++            Err(error) => {
++                log::warn!("could not ready a message to send again: {error}");
++                return;
++            }
++        }
++        self.awaiting_ack
++            .insert(id.clone(), AwaitingAck::Message(chat.clone()));
++        self.emit_message(&chat, &id);
++        self.emit_chat(&chat);
++        tokio::spawn(send_outgoing(
++            client,
++            self.commands.clone(),
++            chat,
++            jid,
++            id,
++            message,
++            expiration,
++            None,
++        ));
++    }
++
++    /// Whether the server acknowledged a message of ours, or a receipt or a
++    /// copy that was sent showed it went out.
++    fn went_out(&self, chat: &str, id: &str) -> bool {
++        let went_out = Delivery::Sent..Delivery::Failed;
++        let stored = self.archive.message(chat, id).ok().flatten();
++        stored.is_some_and(|stored| went_out.contains(&stored.status))
++    }
++
++    /// A message of ours as it was filed, to send again, and the timer it
++    /// was first sent with, even if the chat's has changed since: a retry
++    /// sends the message as it was.
++    fn stored_send(&self, chat: &str, id: &str) -> Option<(wa::Message, Option<u32>)> {
++        let message = self
++            .archive
++            .raw(chat, id)
++            .ok()
++            .flatten()
++            .and_then(|raw| wa::Message::decode_from_slice(&raw).ok())?;
++        let expiration = archived_expiration(&message);
++        Some((message, expiration))
++    }
++
+     /// Sends a spot as a location, keeping the row locally the way a phone
+     /// does, so the bubble shows before the phone acknowledges it.
+     fn send_location(
+@@ -12536,6 +12650,13 @@ fn apply_ephemeral_expiration(message: &mut wa::Message, expiration: Option<u32>
+         .then_some(expiration)
+ }
+ 
++/// The disappearing timer a stored message of ours was sent with.
++fn archived_expiration(message: &wa::Message) -> Option<u32> {
++    message
++        .get_ephemeral_expiration()
++        .filter(|expiration| *expiration > 0)
++}
++
+ #[allow(clippy::too_many_arguments)]
+ async fn send_outgoing(
+     client: Arc<Client>,
+@@ -20894,6 +21015,183 @@ mod receipt_tests {
+         }
+     }
+ 
++    fn own_status(worker: &Worker, id: &str) -> Delivery {
++        worker
++            .archive
++            .message(PEER, id)
++            .expect("read")
++            .expect("stored")
++            .status
++    }
++
++    #[tokio::test]
++    async fn a_send_of_ours_is_noted_until_it_reports() {
++        let (mut worker, _events, _inbox, _wa) = worker();
++        for (id, at) in [("cut", 1), ("done", 2)] {
++            let pending = Message {
++                status: Delivery::Pending,
++                ..own_message(id, at)
++            };
++            worker.store_message(pending, None, None);
++        }
++        worker
++            .handle_command(Command::Sent {
++                chat: PEER.into(),
++                id: "done".into(),
++                error: None,
++            })
++            .await;
++
++        // What the next start does, while no send runs.
++        assert_eq!(worker.archive.fail_cut_off_sends().expect("cut off"), 1);
++        assert_eq!(own_status(&worker, "cut"), Delivery::Failed);
++        assert_eq!(own_status(&worker, "done"), Delivery::Sent);
++    }
++
++    #[tokio::test]
++    async fn a_send_reports_after_its_chat_moved_to_the_phone_number() {
++        let (mut worker, _events, _inbox, _wa) = worker();
++        let pending = Message {
++            chat: PEER_LID.into(),
++            status: Delivery::Pending,
++            ..own_message("m", 1)
++        };
++        worker.store_message(pending, None, None);
++        worker.learn_lid("167650256810092", "4917663430455");
++        worker
++            .handle_command(Command::Sent {
++                chat: PEER_LID.into(),
++                id: "m".into(),
++                error: None,
++            })
++            .await;
++
++        assert_eq!(own_status(&worker, "m"), Delivery::Sent);
++        assert_eq!(worker.archive.fail_cut_off_sends().expect("cut off"), 0);
++    }
++
++    #[tokio::test]
++    async fn a_send_whose_outcome_was_not_filed_stays_noted() {
++        let (mut worker, _events, _inbox, _wa) = worker();
++        let pending = Message {
++            status: Delivery::Pending,
++            ..own_message("m", 1)
++        };
++        worker.store_message(pending, None, None);
++        crate::archive::tests::reject_status(&worker.archive, "m");
++        worker
++            .handle_command(Command::Sent {
++                chat: PEER.into(),
++                id: "m".into(),
++                error: None,
++            })
++            .await;
++        crate::archive::tests::accept_status(&worker.archive);
++
++        assert_eq!(
++            worker.archive.fail_cut_off_sends().expect("cut off"),
++            1,
++            "a message still pending is offered again"
++        );
++    }
++
++    #[tokio::test]
++    async fn a_retry_to_a_blocked_contact_is_refused() {
++        let (mut worker, events, _inbox, _wa) = worker();
++        worker.privacy_ready = true;
++        worker.blocklist.ids = Some([PEER.into()].into());
++        let failed = Message {
++            status: Delivery::Failed,
++            ..own_message("m", 1)
++        };
++        let raw = outgoing_text("hi".into(), None, &[]).encode_to_vec();
++        worker.store_message(failed, Some(raw), None);
++        while events.try_recv().is_ok() {}
++
++        worker
++            .handle_command(Command::Resend {
++                chat: PEER.into(),
++                id: "m".into(),
++            })
++            .await;
++
++        assert_eq!(own_status(&worker, "m"), Delivery::Failed);
++        assert!(
++            events
++                .try_iter()
++                .any(|event| matches!(event, Event::Error(error) if error.contains("Unblock")))
++        );
++    }
++
++    #[test]
++    fn a_retry_keeps_the_timer_the_message_was_sent_with() {
++        let (mut worker, _events, _inbox, _wa) = worker();
++        let mut timed = outgoing_text("hi".into(), None, &[]);
++        assert_eq!(
++            apply_ephemeral_expiration(&mut timed, Some(86_400)),
++            Some(86_400)
++        );
++        let plain = outgoing_text("hi".into(), None, &[]);
++        for (id, raw) in [("timed", timed), ("plain", plain)] {
++            let failed = Message {
++                status: Delivery::Failed,
++                ..own_message(id, 1)
++            };
++            let raw = raw.encode_to_vec();
++            worker.store_message(failed, Some(raw), None);
++        }
++        // The chat's timer changes after both were sent.
++        worker.archive.ensure_chat(PEER, "Fixture").expect("chat");
++        worker
++            .archive
++            .set_ephemeral(PEER, 604_800, 2)
++            .expect("timer");
++        assert_eq!(worker.ephemeral_expiration(PEER), Some(604_800));
++
++        let timer = |id: &str| worker.stored_send(PEER, id).map(|sent| sent.1);
++        assert_eq!(timer("timed"), Some(Some(86_400)));
++        assert_eq!(timer("plain"), Some(None), "no timer is added either");
++    }
++
++    #[tokio::test]
++    async fn a_retry_while_offline_keeps_the_message_not_sent() {
++        let (mut worker, events, _inbox, _wa) = worker();
++        worker.privacy_ready = true;
++        let failed = Message {
++            status: Delivery::Failed,
++            ..own_message("m", 1)
++        };
++        let raw = outgoing_text("hi".into(), None, &[]).encode_to_vec();
++        worker.store_message(failed, Some(raw), None);
++        while events.try_recv().is_ok() {}
++
++        worker
++            .handle_command(Command::Resend {
++                chat: PEER.into(),
++                id: "m".into(),
++            })
++            .await;
++
++        assert_eq!(own_status(&worker, "m"), Delivery::Failed);
++        assert!(
++            events.try_iter().any(
++                |event| matches!(event, Event::Error(error) if error.contains("not sent again"))
++            )
++        );
++    }
++
++    #[test]
++    fn a_receipt_shows_a_message_marked_not_sent_arrived() {
++        let (mut worker, _events, _inbox, _wa) = worker();
++        let failed = Message {
++            status: Delivery::Failed,
++            ..own_message("m", 1)
++        };
++        worker.store_message(failed, None, None);
++        worker.on_receipt(&receipt(PEER, &["m"], ReceiptType::Delivered));
++        assert_eq!(own_status(&worker, "m"), Delivery::Delivered);
++    }
++
+     fn receipt(chat: &str, ids: &[&str], kind: ReceiptType) -> wa_events::Receipt {
+         let chat: Jid = chat.parse().expect("jid");
+         wa_events::Receipt::builder()
+@@ -22858,6 +23156,34 @@ mod receipt_tests {
+         );
+     }
+ 
++    #[test]
++    fn history_tells_the_transcript_a_message_marked_not_sent_went_out() {
++        use wa::web_message_info::Status;
++        let (mut worker, events, _inbox, _wa) = worker();
++        let failed = Message {
++            status: Delivery::Failed,
++            ..own_message("m", 100)
++        };
++        worker.store_message(failed, None, None);
++        while events.try_recv().is_ok() {}
++        let mut entry = history_entry(
++            PEER,
++            "m",
++            true,
++            None,
++            wa::Message::text("hi"),
++            Vec::new(),
++            None,
++        );
++        entry.message.as_option_mut().unwrap().status = Some(Status::SERVER_ACK);
++        file_history_entries(&mut worker, vec![entry]);
++        let told = std::iter::from_fn(|| events.try_recv().ok()).any(|event| {
++            matches!(event, Event::MessageUpdated(message)
++                if message.id == "m" && message.status == Delivery::Sent)
++        });
++        assert!(told, "the transcript still shows it not sent");
++    }
++
+     #[test]
+     fn history_receipts_date_direct_ticks_and_fill_group_message_info() {
+         use wa::web_message_info::Status;
+@@ -24115,6 +24441,54 @@ mod receipt_tests {
+         );
+     }
+ 
++    #[test]
++    fn a_server_ack_files_the_send_before_it_reports() {
++        let (mut worker, _events, _inbox, _wa) = worker();
++        worker.store_message(
++            Message {
++                status: Delivery::Pending,
++                ..own_message("mine", 200)
++            },
++            None,
++            None,
++        );
++        let timed = wa_events::ServerAck::builder()
++            .id("mine".to_owned())
++            .class("message".to_owned())
++            .timestamp(whatsapp_rust::wacore::time::from_secs(140).unwrap())
++            .build();
++        worker.server_ack(&timed);
++        assert_eq!(own_status(&worker, "mine"), Delivery::Sent);
++        // A quit before the send reports leaves nothing to mark not sent.
++        assert_eq!(worker.archive.fail_cut_off_sends().expect("cut off"), 0);
++    }
++
++    #[tokio::test]
++    async fn an_error_after_the_server_ack_leaves_the_message_sent() {
++        let (mut worker, _events, _inbox, _wa) = worker();
++        let pending = Message {
++            status: Delivery::Pending,
++            ..own_message("mine", 200)
++        };
++        worker.store_message(pending, None, None);
++        let timed = wa_events::ServerAck::builder()
++            .id("mine".to_owned())
++            .class("message".to_owned())
++            .timestamp(whatsapp_rust::wacore::time::from_secs(140).unwrap())
++            .build();
++        worker.server_ack(&timed);
++        worker
++            .handle_command(Command::Sent {
++                chat: PEER.into(),
++                id: "mine".into(),
++                error: Some("timed out".into()),
++            })
++            .await;
++
++        // It went out, so it offers no Retry that would move it again.
++        assert_eq!(own_status(&worker, "mine"), Delivery::Sent);
++    }
++
+     #[test]
+     fn replying_on_the_phone_reads_only_preceding_messages() {
+         let (mut worker, events, _inbox, _wa) = worker();
+diff --git a/src/demo.rs b/src/demo.rs
+index 7376ee1..a2e560f 100644
+--- a/src/demo.rs
++++ b/src/demo.rs
+@@ -2932,8 +2932,9 @@ pub fn apply_flags(app: &mut App, page: Option<&str>) {
+             }
+             "shortcuts" => app.dialog = Some(Dialog::Shortcuts),
+             "about" => app.dialog = Some(Dialog::About),
+-            "failed" => {
++            "failed" | "failed-menu" => {
+                 // The newest outgoing message in the open chat failed to send.
++                // `failed-menu` also opens its Retry and Cancel menu.
+                 if let Some(message) = app
+                     .open_chat
+                     .clone()
+@@ -4075,6 +4076,20 @@ fn phone_menu_sample(app: &mut App) {
+     app.scroll_to_bottom = true;
+ }
+ 
++/// The Retry and Cancel menu of the newest message in the open chat that
++/// was not sent, which `--demo-page failed-menu` opens.
++pub fn not_sent_menu_popup_id(app: &App) -> Option<egui::Id> {
++    let chat = app.open_chat.as_deref()?;
++    let message = app
++        .conversations
++        .get(chat)?
++        .messages
++        .iter()
++        .rev()
++        .find(|message| message.from_me && message.status == crate::model::Delivery::Failed)?;
++    Some(crate::ui::conversation::not_sent_menu_id(chat, &message.id))
++}
++
+ pub fn phone_menu_popup_id() -> egui::Id {
+     let start = PHONE_MENU_SAMPLE.find('+').unwrap();
+     let end = start + "+1 (555) 010-2040".len();
+@@ -9726,6 +9741,7 @@ mod tests {
+             "shortcuts",
+             "about",
+             "failed",
++            "failed-menu",
+             "info",
+             "info-media",
+             "info-docs",
+@@ -13543,7 +13559,7 @@ mod tests {
+             assert!(
+                 nodes
+                     .iter()
+-                    .any(|(label, _, _)| label.contains("will not retry it"))
++                    .any(|(label, _, _)| label.contains("send it again or to cancel it"))
+             );
+         }
+     }
+@@ -20652,12 +20668,74 @@ mod tests {
+             .filter(|(_, node)| {
+                 node.label()
+                     .or_else(|| node.value())
+-                    .is_some_and(|label| label.starts_with("This message could not be sent"))
++                    .is_some_and(|label| label.starts_with("This message was not sent"))
+             })
+             .count();
+         assert_eq!(hints, 1, "exactly the failed message carries the hint");
+     }
+ 
++    /// The "Not sent" label opens Retry and Cancel, and Retry asks for the
++    /// stored message to be sent again.
++    #[test]
++    fn the_not_sent_label_offers_retry_and_cancel() {
++        use egui::accesskit::Role;
++        let mut app = app();
++        app.backend.record_demo_commands();
++        let ctx = egui::Context::default();
++        ctx.enable_accesskit();
++        app.attach(&ctx);
++        apply_flags(&mut app, Some("failed"));
++        render(&mut app, &ctx);
++        let menu = not_sent_menu_popup_id(&app).expect("a message that was not sent");
++        let nodes = accessible_nodes(&mut app, &ctx, vec![]);
++        let label = nodes
++            .iter()
++            .find(|(label, role, _)| {
++                *role == Role::Button && label.starts_with("This message was not sent")
++            })
++            .expect("the Not sent label is a button")
++            .2;
++        frame_sized(
++            &mut app,
++            &ctx,
++            780.0,
++            vec![egui::Event::PointerMoved(label)],
++        );
++        frame_sized(&mut app, &ctx, 780.0, vec![primary(label, true)]);
++        frame_sized(&mut app, &ctx, 780.0, vec![primary(label, false)]);
++        assert!(egui::Popup::is_id_open(&ctx, menu));
++
++        let nodes = accessible_nodes(&mut app, &ctx, vec![]);
++        assert!(
++            nodes.iter().any(|(label, _, _)| label == "Cancel"),
++            "{nodes:?}"
++        );
++        // As wide as its two labels need, not as wide as the chat.
++        let area = ctx
++            .memory(|memory| memory.area_rect(menu))
++            .expect("the menu is shown");
++        assert!(area.width() < 200.0, "{area:?}");
++        let retry = nodes
++            .iter()
++            .find(|(label, _, _)| label == "Retry")
++            .expect("Retry")
++            .2;
++        frame_sized(
++            &mut app,
++            &ctx,
++            780.0,
++            vec![egui::Event::PointerMoved(retry)],
++        );
++        frame_sized(&mut app, &ctx, 780.0, vec![primary(retry, true)]);
++        frame_sized(&mut app, &ctx, 780.0, vec![primary(retry, false)]);
++        assert!(
++            app.backend
++                .take_demo_commands()
++                .iter()
++                .any(|command| matches!(command, crate::backend::Command::Resend { .. }))
++        );
++    }
++
+     /// Every control the line under the header draws is reachable without a
+     /// pointer: the row opens its message and the pin beside it steps to the
+     /// next pin, and both are labelled buttons.
+diff --git a/src/main.rs b/src/main.rs
+index 3a30cb5..0fdc6ee 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -416,6 +416,11 @@ fn run() -> eframe::Result<()> {
+         .demo_page
+         .as_deref()
+         .is_some_and(|page| page.split(',').any(|part| part.trim() == "phone-menu"));
++    #[cfg(feature = "demo")]
++    let demo_not_sent_menu = cli
++        .demo_page
++        .as_deref()
++        .is_some_and(|page| page.split(',').any(|part| part.trim() == "failed-menu"));
+     let mut update_receipt = launch.receipt;
+     // The link, archive, and tray outlive windows. The shell recreates a
+     // window when the tray, a notification, or another launch requests one;
+@@ -503,6 +508,8 @@ fn run() -> eframe::Result<()> {
+                         #[cfg(feature = "demo")]
+                         open_phone_menu: demo_phone_menu,
+                         #[cfg(feature = "demo")]
++                        open_not_sent_menu: demo_not_sent_menu,
++                        #[cfg(feature = "demo")]
+                         tour,
+                     }))
+                 }),
+@@ -678,6 +685,8 @@ struct Shell {
+     hover: Option<egui::Pos2>,
+     #[cfg(feature = "demo")]
+     open_phone_menu: bool,
++    #[cfg(feature = "demo")]
++    open_not_sent_menu: bool,
+ }
+ 
+ /// Pending screenshot request.
+@@ -833,6 +842,12 @@ impl Shell {
+         if std::mem::take(&mut self.open_phone_menu) {
+             egui::Popup::open_id(ui.ctx(), zapfast::demo::phone_menu_popup_id());
+         }
++        #[cfg(feature = "demo")]
++        if std::mem::take(&mut self.open_not_sent_menu)
++            && let Some(popup) = zapfast::demo::not_sent_menu_popup_id(app)
++        {
++            egui::Popup::open_id(ui.ctx(), popup);
++        }
+         app.frame_ui(ui);
+         #[cfg(target_os = "macos")]
+         app.match_window_transparency(ui.ctx(), self.transparent);
+diff --git a/src/model.rs b/src/model.rs
+index 71eba79..ae14797 100644
+--- a/src/model.rs
++++ b/src/model.rs
+@@ -3036,6 +3036,11 @@ pub enum Action {
+         chat: ChatId,
+         id: String,
+     },
++    /// Sends one of our messages that was not sent again.
++    Resend {
++        chat: ChatId,
++        id: String,
++    },
+     /// Stars or unstars one message from its bubble's menu.
+     SetStar {
+         chat: ChatId,
+diff --git a/src/ui/conversation.rs b/src/ui/conversation.rs
+index 9b6a59a..f33a199 100644
+--- a/src/ui/conversation.rs
++++ b/src/ui/conversation.rs
+@@ -58,7 +58,7 @@ const SELECT_GUTTER: f32 = SELECT_BOX + 14.0;
+ /// Footer label on an outgoing message that failed to send.
+ const NOT_SENT: &str = "Not sent";
+ const NOT_SENT_HINT: &str =
+-    "This message could not be sent, and ZapFast will not retry it. Send it again yourself.";
++    "This message was not sent. Click Not sent to send it again or to cancel it.";
+ 
+ pub fn show(app: &mut App, ui: &mut egui::Ui) {
+     let Some(chat) = app.current_chat().cloned() else {
+@@ -5938,7 +5938,8 @@ fn bubble_frame(
+                 }
+             };
+             if over_picture && let Some(picture) = slot {
+-                footer_over_picture(ui, view, message, picture, starred, pinned, actions);
++                let menu = not_sent_menu_id(&message.chat, &message.id);
++                footer_over_picture(ui, view, message, picture, starred, pinned, menu, actions);
+             } else {
+                 footer(ui, view, last, slot, starred, pinned, actions);
+             }
+@@ -6844,6 +6845,8 @@ const OVER_PICTURE_INSET: Vec2 = vec2(10.0, 6.0);
+ 
+ /// Paints the time and ticks over the bottom corner of a picture without a
+ /// caption, in white on a soft dark scrim so they read on any picture.
++/// `menu` is the popup a "Not sent" label opens.
++#[allow(clippy::too_many_arguments)]
+ fn footer_over_picture(
+     ui: &mut egui::Ui,
+     view: &View<'_>,
+@@ -6851,6 +6854,7 @@ fn footer_over_picture(
+     picture: Rect,
+     starred: bool,
+     pinned: bool,
++    menu: egui::Id,
+     actions: &mut Vec<Action>,
+ ) {
+     let palette = &view.palette;
+@@ -6909,16 +6913,7 @@ fn footer_over_picture(
+             failed.size(),
+         );
+         ui.painter().galley(label.min, failed, Color32::WHITE);
+-        let status = Rect::from_min_max(label.min, pos2(row.right(), label.max.y));
+-        let response = ui.interact(
+-            status,
+-            ui.id().with(("not-sent", &message.id)),
+-            Sense::hover(),
+-        );
+-        response.widget_info(|| {
+-            egui::WidgetInfo::labeled(egui::WidgetType::Label, true, NOT_SENT_HINT)
+-        });
+-        response.on_hover_text(NOT_SENT_HINT);
++        not_sent_menu(ui, view, message, label, menu, actions);
+     }
+     if pinned {
+         x -= FOOTER_MARK_SLOT;
+@@ -6999,6 +6994,50 @@ fn not_sent(message: &Message) -> bool {
+     message.from_me && message.status == Delivery::Failed
+ }
+ 
++/// The popup a not-sent message's label opens in its bubble's footer. An
++/// album's tile has its own, since the album's last message shows both.
++pub(crate) fn not_sent_menu_id(chat: &str, id: &str) -> egui::Id {
++    egui::Id::new(("not-sent-menu", chat, id))
++}
++
++/// The "Not sent" label explains itself on hover and to screen readers, and
++/// opens Retry and Cancel: send the message again as it was, or delete it,
++/// after the confirmation every deletion asks for. It covers the label
++/// alone, so the ticks beside it still open the message's info.
++fn not_sent_menu(
++    ui: &mut egui::Ui,
++    view: &View<'_>,
++    message: &Message,
++    label: Rect,
++    menu: egui::Id,
++    actions: &mut Vec<Action>,
++) {
++    let response = ui
++        .interact(label, menu.with("label"), Sense::click())
++        .on_hover_cursor(egui::CursorIcon::PointingHand);
++    response
++        .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, NOT_SENT_HINT));
++    let response = response.on_hover_text(NOT_SENT_HINT);
++    let palette = &view.palette;
++    let retry = crate::i18n::gettext(view.locale, "Retry");
++    let cancel = crate::i18n::gettext(view.locale, "Cancel");
++    egui::Popup::menu(&response)
++        .id(menu)
++        .width(widgets::menu_width(ui, &[&*retry, &*cancel], true))
++        .frame(widgets::menu_frame(palette))
++        .show(|ui| {
++            if widgets::menu_item(ui, palette, Some(Icon::Refresh), &retry) {
++                actions.push(Action::Resend {
++                    chat: message.chat.clone(),
++                    id: message.id.clone(),
++                });
++            }
++            if widgets::menu_item(ui, palette, Some(Icon::X), &cancel) {
++                actions.push(delete_for_me_action(&message.chat, &message.id));
++            }
++        });
++}
++
+ /// Paints the time and ticks at the bubble's right edge without widening it.
+ fn footer(
+     ui: &mut egui::Ui,
+@@ -7109,18 +7148,8 @@ fn footer(
+             failed.size(),
+         );
+         ui.painter().galley(label.min, failed, palette.text);
+-        // Explain on hover and to screen readers; hovering takes no clicks
+-        // from the bubble.
+-        let status = Rect::from_min_max(label.min, pos2(rect.right(), label.max.y));
+-        let response = ui.interact(
+-            status,
+-            ui.id().with(("not-sent", &message.id)),
+-            Sense::hover(),
+-        );
+-        response.widget_info(|| {
+-            egui::WidgetInfo::labeled(egui::WidgetType::Label, true, NOT_SENT_HINT)
+-        });
+-        response.on_hover_text(NOT_SENT_HINT);
++        let menu = not_sent_menu_id(&message.chat, &message.id);
++        not_sent_menu(ui, view, message, label, menu, actions);
+     }
+     if starred {
+         x -= FOOTER_MARK_SLOT;
+@@ -7326,6 +7355,7 @@ pub(crate) fn menu_width(
+ fn message_menu_labels(locale: crate::i18n::Locale) -> Vec<String> {
+     use crate::i18n::gettext;
+     [
++        gettext(locale, "Retry"),
+         gettext(locale, "Reply"),
+         gettext(locale, "Reply privately"),
+         gettext(locale, "Star"),
+@@ -7655,6 +7685,19 @@ fn context_menu(
+         first.get_or_insert(response.id);
+         response.clicked()
+     };
++    // What the "Not sent" label offers, here too for the keyboard.
++    if not_sent(message)
++        && item(
++            ui,
++            Icon::Refresh,
++            &crate::i18n::gettext(view.locale, "Retry"),
++        )
++    {
++        actions.push(Action::Resend {
++            chat: chat.clone(),
++            id: message.id.clone(),
++        });
++    }
+     if can_reply(&message.content)
+         && item(ui, Icon::Reply, &crate::i18n::gettext(view.locale, "Reply"))
+     {
+@@ -9427,7 +9470,8 @@ fn album_tile(
+         if not_sent(message) {
+             let starred = view.starred.is_some_and(|ids| ids.contains(&message.id));
+             let pinned = view.pins.is_some_and(|ids| ids.contains(&message.id));
+-            footer_over_picture(ui, view, message, rect, starred, pinned, actions);
++            let menu = not_sent_menu_id(&message.chat, &message.id).with("album-tile");
++            footer_over_picture(ui, view, message, rect, starred, pinned, menu, actions);
+         }
+     }
+     // A motion photo in an album keeps its own badge and clip.
+@@ -13214,6 +13258,7 @@ mod tests {
+                             picture,
+                             starred,
+                             pinned,
++                            not_sent_menu_id(&message.chat, &message.id),
+                             &mut Vec::new(),
+                         );
+                     },
+@@ -13823,8 +13868,19 @@ mod reaction_tests {
+         let directory = tempfile::tempdir().unwrap();
+         let file = directory.path().join("photo.jpg");
+         std::fs::write(&file, b"jpeg").unwrap();
++        // A message of ours that was not sent also offers Retry. It stays out
++        // of the shared fixtures until the catalogs translate it.
++        let mut failed = with_reactions(Vec::new());
++        failed.from_me = true;
++        failed.status = Delivery::Failed;
++        let failed = MenuRow {
++            message: failed,
++            marks: Marks { starred: false },
++            pinned: false,
++        };
+         let mut labels: Vec<String> = menu_fixtures(&file)
+             .iter()
++            .chain([&failed])
+             .flat_map(|row| drawn_menu_words(crate::i18n::Locale::English, row))
+             .collect();
+         // The menu is as wide as the longest label it measures. The
