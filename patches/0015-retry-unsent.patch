@@ -1,8 +1,141 @@
 diff --git a/src/app.rs b/src/app.rs
-index 654c49a..f802b20 100644
+index 654c49a..859bc4f 100644
 --- a/src/app.rs
 +++ b/src/app.rs
-@@ -7474,7 +7474,8 @@ impl App {
+@@ -949,6 +949,8 @@ pub struct App {
+     pub window_hidden: bool,
+     /// Whether window close should keep the process running.
+     pub hide_intent: bool,
++    /// A closed window waiting for the accounts' sends before quitting.
++    closing: Option<Closing>,
+     /// Whether a headless app should create a window.
+     pub wants_show: bool,
+     /// A hidden start whose tray item no panel shows yet waits until then
+@@ -1245,6 +1247,8 @@ impl fastframe_shell::Resident for App {
+             fastframe_shell::Headless::Quit
+         } else if self.wants_show {
+             fastframe_shell::Headless::Show
++        } else if self.closing_done(Instant::now()) {
++            fastframe_shell::Headless::Quit
+         } else {
+             fastframe_shell::Headless::Wait
+         }
+@@ -1287,6 +1291,52 @@ const TRAY_WAIT: Duration = Duration::from_secs(30);
+ /// work and disconnect.
+ const QUIT_WAIT: Duration = Duration::from_secs(10);
+ 
++/// How long a closed window waits for a message still sending before
++/// ZapFast quits anyway, leaving it to show as not sent.
++const SEND_WAIT: Duration = Duration::from_secs(60);
++
++/// A window closed while a message may still be sending. ZapFast runs
++/// without it until each account's worker says no send is running.
++struct Closing {
++    until: Instant,
++    waiting: Vec<tokio::sync::oneshot::Receiver<()>>,
++}
++
++impl Closing {
++    /// Asks every account's worker to say when its sends have finished.
++    /// A worker runs its commands in order, so a send asked for just before
++    /// is counted.
++    fn ask(accounts: &[Account], now: Instant) -> Self {
++        let waiting = accounts
++            .iter()
++            .map(|account| {
++                let (done, finished) = tokio::sync::oneshot::channel();
++                account.backend.send(Command::SendsFinished(done));
++                finished
++            })
++            .collect();
++        Self {
++            until: now + SEND_WAIT,
++            waiting,
++        }
++    }
++
++    /// Whether every worker has answered or stopped without answering, or
++    /// the wait is over.
++    fn done(&mut self, now: Instant) -> bool {
++        self.waiting.retain_mut(unanswered);
++        self.waiting.is_empty() || now >= self.until
++    }
++}
++
++/// Whether a worker asked about its sends has yet to answer.
++fn unanswered(finished: &mut tokio::sync::oneshot::Receiver<()>) -> bool {
++    matches!(
++        finished.try_recv(),
++        Err(tokio::sync::oneshot::error::TryRecvError::Empty)
++    )
++}
++
+ const TRAY_SHOW: &str = "show";
+ const TRAY_LOCK: &str = "lock";
+ const TRAY_QUIT: &str = "quit";
+@@ -1798,6 +1848,7 @@ impl App {
+             tray_lockable,
+             window_hidden: false,
+             hide_intent: false,
++            closing: None,
+             wants_show: false,
+             tray_wait: None,
+             tray_clicked: None,
+@@ -2537,6 +2588,10 @@ impl App {
+         if !self.account().settings.notifications || self.power.conditions().display_off {
+             return;
+         }
++        // The window was closed, and ZapFast quits once its sends finish.
++        if self.closing.is_some() {
++            return;
++        }
+         let Some(chat) = self.chat(chat_id) else {
+             return;
+         };
+@@ -2693,6 +2748,9 @@ impl App {
+ 
+     /// Initializes a newly created window.
+     pub fn attach(&mut self, ctx: &egui::Context) {
++        // A window is open again, shown or replacing the last one: closing it
++        // waits for the sends afresh.
++        self.closing = None;
+         // Texture handles belong to the window's egui context. Keep the
+         // underlying pictures and recreate handles for the new window.
+         self.call_local_texture = None;
+@@ -7221,14 +7279,27 @@ impl App {
+         // Close the window and continue headless when background mode is
+         // enabled. Decided here rather than in `frame_ui`, which eframe skips
+         // for a minimized window: closing one from the taskbar quit instead.
+-        if ctx.input(|input| input.viewport().close_requested())
+-            && !self.quit_requested
+-            && self.keeps_running_on_close()
+-        {
+-            self.hide_intent = true;
++        if ctx.input(|input| input.viewport().close_requested()) && !self.quit_requested {
++            if self.keeps_running_on_close() {
++                self.hide_intent = true;
++            } else if !self.reopen && self.closing.is_none() {
++                // Quitting now would cut off a message still sending, which
++                // then shows as not sent at the next start: run without a
++                // window until the accounts' sends have finished.
++                self.closing = Some(Closing::ask(&self.accounts, Instant::now()));
++                self.hide_intent = true;
++            }
+         }
+     }
+ 
++    /// Whether a window closed while sends ran may now quit.
++    fn closing_done(&mut self, now: Instant) -> bool {
++        let Some(closing) = &mut self.closing else {
++            return false;
++        };
++        closing.done(now)
++    }
++
+     pub fn load_custom_themes(&mut self) {
+         let waker = self.waker.clone();
+         self.custom_themes.start(
+@@ -7474,7 +7545,8 @@ impl App {
              | Action::ReplyInteractive { chat, .. }
              | Action::CreatePoll { chat, .. }
              | Action::VotePoll { chat, .. }
@@ -12,7 +145,7 @@ index 654c49a..f802b20 100644
              Action::SendPending { account, chat, .. } if account == &self.account().id => {
                  Some(chat.as_str())
              }
-@@ -8528,6 +8529,9 @@ impl App {
+@@ -8528,6 +8600,9 @@ impl App {
                  // `Event::MessageDeleted` removes it and prunes the selection.
                  self.backend.send(Command::DeleteLocal { chat, id });
              }
@@ -22,6 +155,92 @@ index 654c49a..f802b20 100644
              Action::Attach { documents } => {
                  if let Some(chat) = self.open_chat.clone() {
                      self.backend.send(Command::PickFiles { chat, documents });
+@@ -18191,7 +18266,7 @@ mod tests {
+ 
+     /// eframe runs only the logic pass for a minimized window, so closing one
+     /// (from the taskbar, say) must still hide it to the tray rather than
+-    /// quit, and quit when nothing could bring it back.
++    /// quit, and, when nothing could bring it back, wait only for its sends.
+     #[test]
+     fn closing_a_minimized_window_hides_it_to_the_tray() {
+         use fastframe_shell::{Closed, Resident};
+@@ -18214,7 +18289,8 @@ mod tests {
+         let mut app = self::app();
+         app.test_tray_shown = Some(false);
+         close_minimized(&mut app);
+-        assert_eq!(app.closed(), Closed::Quit, "no tray, no way back");
++        assert_eq!(app.closed(), Closed::Hide, "only until the sends finish");
++        assert!(app.closing.is_some());
+ 
+         let mut app = self::app();
+         app.test_tray_shown = Some(true);
+@@ -18223,6 +18299,66 @@ mod tests {
+         assert_eq!(app.closed(), Closed::Quit);
+     }
+ 
++    /// With nothing to keep ZapFast running, closing the window lets a
++    /// message still sending finish: it runs without a window until every
++    /// account's worker says no send is running, or stops without saying,
++    /// or `SEND_WAIT` is over. Launching it meanwhile brings the window back.
++    #[test]
++    fn closing_the_window_lets_a_send_finish_before_quitting() {
++        use fastframe_shell::{Closed, Headless, Resident};
++        let ctx = egui::Context::default();
++        let close = |app: &mut App| {
++            let (backend, mut inbox) = Backend::recording();
++            app.backend = backend;
++            app.test_tray_shown = Some(false);
++            let mut input = egui::RawInput::default();
++            let info = input.viewports.entry(egui::ViewportId::ROOT).or_default();
++            info.events.push(egui::ViewportEvent::Close);
++            let mut output = ctx.run_ui(input, |ui| app.window_logic(ui.ctx()));
++            output.textures_delta.clear();
++            assert_eq!(app.closed(), Closed::Hide, "hidden while sends finish");
++            Resident::window_gone(app);
++            std::iter::from_fn(|| inbox.try_recv().ok())
++                .find_map(|command| match command {
++                    Command::SendsFinished(done) => Some(done),
++                    _ => None,
++                })
++                .expect("the worker is asked")
++        };
++
++        let mut app = app();
++        let done = close(&mut app);
++        assert_eq!(app.headless_frame(&ctx), Headless::Wait, "a send runs");
++        done.send(()).expect("still waiting");
++        assert_eq!(app.headless_frame(&ctx), Headless::Quit);
++
++        let mut app = self::app();
++        drop(close(&mut app));
++        assert_eq!(
++            app.headless_frame(&ctx),
++            Headless::Quit,
++            "a worker that stopped is sending nothing"
++        );
++
++        // The shell attaches every window it opens, whether shown again or
++        // replacing the one closed in the same frame.
++        let mut app = self::app();
++        let _done = close(&mut app);
++        app.wants_show = true;
++        assert_eq!(app.headless_frame(&ctx), Headless::Show);
++        app.attach(&ctx);
++        assert!(app.closing.is_none(), "launched again: not quitting");
++
++        let (_done, finished) = tokio::sync::oneshot::channel();
++        let now = Instant::now();
++        let mut closing = Closing {
++            until: now + SEND_WAIT,
++            waiting: vec![finished],
++        };
++        assert!(!closing.done(now));
++        assert!(closing.done(now + SEND_WAIT), "the wait is over");
++    }
++
+     /// A Wayland compositor ignores an app's focus and unminimize requests, so
+     /// a notification click or a second launch closes the window and asks the
+     /// shell for a fresh one, which the compositor raises, unless the
 diff --git a/src/archive.rs b/src/archive.rs
 index 291efa8..d84c163 100644
 --- a/src/archive.rs
@@ -230,10 +449,10 @@ index 0c9542f..ae24de6 100644
          let archive = Archive::in_memory().unwrap();
 diff --git a/src/archive/sending.rs b/src/archive/sending.rs
 new file mode 100644
-index 0000000..9537525
+index 0000000..d7fff78
 --- /dev/null
 +++ b/src/archive/sending.rs
-@@ -0,0 +1,294 @@
+@@ -0,0 +1,330 @@
 +//! Sends of ours that are running, so that one cut off can be retried.
 +//!
 +//! A message we send is filed as pending before it goes out, and only the
@@ -276,6 +495,20 @@ index 0000000..9537525
 +            params![chat, id],
 +        )?;
 +        Ok(())
++    }
++
++    /// Whether a send of ours is still running: a message noted as sending
++    /// that is still pending. A send that failed some other way can leave
++    /// its note until the next start, but is not running.
++    pub fn sends_running(&self) -> Result<bool> {
++        let running = self.connection.query_row(
++            "SELECT EXISTS (SELECT 1 FROM sending JOIN messages
++                 ON messages.chat = sending.chat AND messages.id = sending.id
++                 WHERE messages.status = ?1)",
++            params![status_rank(Delivery::Pending)],
++            |row| row.get::<_, bool>(0),
++        )?;
++        Ok(running)
 +    }
 +
 +    /// Marks our messages whose send was cut off as failed, and returns how
@@ -527,12 +760,49 @@ index 0000000..9537525
 +        assert!(!archive.retry_send(GROUP, "in").expect("retry"));
 +        assert!(!archive.retry_send(GROUP, "missing").expect("retry"));
 +    }
++
++    #[test]
++    fn only_a_noted_message_still_pending_is_sending() {
++        let archive = Archive::in_memory().expect("opens");
++        assert!(!archive.sends_running().expect("read"), "nothing noted");
++        archive
++            .insert_sending(&message(GROUP, "m", 100, true), None)
++            .expect("insert");
++        assert!(archive.sends_running().expect("read"));
++        archive
++            .set_status(GROUP, "m", Delivery::Failed, 101)
++            .expect("failed");
++        assert!(
++            !archive.sends_running().expect("read"),
++            "a send that failed without reporting is not running"
++        );
++        archive
++            .insert_sending(&message(GROUP, "n", 102, true), None)
++            .expect("insert");
++        archive.sending_finished(GROUP, "n").expect("done");
++        assert!(!archive.sends_running().expect("read"), "a finished send");
++    }
 +}
 diff --git a/src/backend.rs b/src/backend.rs
-index 96d9de3..2768d98 100644
+index 96d9de3..bc93a54 100644
 --- a/src/backend.rs
 +++ b/src/backend.rs
-@@ -464,6 +464,11 @@ pub enum Command {
+@@ -160,6 +160,14 @@ pub struct SendTurn {
+     pub gate: crate::model::UploadGate,
+ }
+ 
++/// Held by an attachment the worker accepted until it is archived: while it
++/// is prepared or uploaded, or waits for the one before it. A closed window
++/// waits while any is held, since nothing would show it was cut off.
++#[derive(Debug)]
++pub struct SendHold {
++    _shared: std::sync::Arc<()>,
++}
++
+ #[derive(Debug)]
+ pub enum Command {
+     FetchBlocklist,
+@@ -464,6 +472,11 @@ pub enum Command {
          chat: ChatId,
          id: String,
      },
@@ -544,8 +814,27 @@ index 96d9de3..2768d98 100644
      /// Completion of the account's deletion sync, before removing our copy.
      MessageDeletedForMe {
          generation: u64,
+@@ -1023,6 +1036,9 @@ pub enum Command {
+     /// Whether the person is looking at ZapFast. While they are not, the
+     /// linked phone keeps receiving push notifications.
+     SetOnline(bool),
++    /// Answers once none of the account's messages is still sending, so a
++    /// closed window can let a send finish before ZapFast quits.
++    SendsFinished(tokio::sync::oneshot::Sender<()>),
+     Shutdown,
+     /// Internal send result.
+     Sent {
+@@ -1107,6 +1123,8 @@ pub enum Command {
+         /// Its place in the chat's line, for an attachment that waits for the
+         /// one staged before it.
+         turn: Option<SendTurn>,
++        /// Held until the worker has archived it.
++        hold: SendHold,
+     },
+     /// Phone numbers a group's metadata named, as (privacy id, number).
+     LearnNumbers(Vec<(String, String)>),
 diff --git a/src/backend/worker.rs b/src/backend/worker.rs
-index 18e5e9f..f52afbc 100644
+index 18e5e9f..f1f2e3c 100644
 --- a/src/backend/worker.rs
 +++ b/src/backend/worker.rs
 @@ -918,6 +918,12 @@ pub async fn run(
@@ -561,7 +850,37 @@ index 18e5e9f..f52afbc 100644
      let (wa_sender, wa_events) = mpsc::unbounded_channel();
      let privacy_confirmed = archive
          .meta("chat_privacy_ready_v1")
-@@ -2451,8 +2457,18 @@ impl Worker {
+@@ -1094,6 +1100,8 @@ pub async fn run(
+         interactive_sending: HashMap::new(),
+         awaiting_ack: HashMap::new(),
+         send_turns: HashMap::new(),
++        send_waiters: Vec::new(),
++        send_holds: Arc::new(()),
+         receipts_watch: None,
+         receipts_pruned: Instant::now(),
+         early: Default::default(),
+@@ -1237,6 +1245,8 @@ pub async fn run(
+                 worker.reconcile_call().await;
+             }
+         }
++        // A send finishes on a command or an event: tell a closed window.
++        worker.settle_send_waiters();
+     }
+     worker.stop_chat_export().await;
+     worker.shutdown_call().await;
+@@ -1550,6 +1560,11 @@ struct Worker {
+     awaiting_ack: HashMap<String, AwaitingAck>,
+     /// Per chat, resolved when the attachment queued last has gone out.
+     send_turns: HashMap<ChatId, oneshot::Receiver<()>>,
++    /// Closed windows waiting for this account's sends to finish.
++    send_waiters: Vec<oneshot::Sender<()>>,
++    /// Shared with each `SendHold`, so more than one holder means an
++    /// attachment is still on its way.
++    send_holds: Arc<()>,
+     /// The group message whose "Message info" is open.
+     receipts_watch: Option<(ChatId, String)>,
+     /// When receipts that never found their message were last dropped.
+@@ -2451,8 +2466,18 @@ impl Worker {
          match self.archive.restamp_sent(&chat, &ack.id, at.timestamp()) {
              Ok(changed) => {
                  self.awaiting_ack.remove(&ack.id);
@@ -581,7 +900,7 @@ index 18e5e9f..f52afbc 100644
                      self.emit_chat(&chat);
                  }
              }
-@@ -6117,7 +6133,15 @@ impl Worker {
+@@ -6117,7 +6142,15 @@ impl Worker {
              message.content.keep_local_paths(&existing.content);
              keep_live_location_notice(&mut message.content, existing);
          }
@@ -598,7 +917,7 @@ index 18e5e9f..f52afbc 100644
              log::warn!("could not store a message: {error}");
              return;
          }
-@@ -6127,7 +6151,7 @@ impl Worker {
+@@ -6127,7 +6160,7 @@ impl Worker {
              self.download(chat.clone(), message.id.clone());
          }
          // Only a stored message can be moved to the server's time.
@@ -607,7 +926,7 @@ index 18e5e9f..f52afbc 100644
              self.awaiting_ack.insert(
                  message.id.clone(),
                  AwaitingAck::Message(message.chat.clone()),
-@@ -6725,10 +6749,13 @@ impl Worker {
+@@ -6725,10 +6758,13 @@ impl Worker {
                  let existing = self.archive.message(&id, &row.id).ok().flatten();
                  // A transcript already on screen is not paged again, so a
                  // status history moves forward, such as a voice message the
@@ -625,7 +944,7 @@ index 18e5e9f..f52afbc 100644
                  // What the info panel listed for this row before it lands,
                  // so a change to its pictures, documents or links is told.
                  let before = existing.as_ref().map(|existing| existing.content.clone());
-@@ -7345,7 +7372,8 @@ impl Worker {
+@@ -7345,7 +7381,8 @@ impl Worker {
              | Command::SendSticker { chat, .. }
              | Command::SendGif { chat, .. }
              | Command::SendLocation { chat, .. }
@@ -635,7 +954,7 @@ index 18e5e9f..f52afbc 100644
              // A batch goes to every recipient or to none of them.
              Command::Forward { to_chats, .. } => to_chats
                  .iter()
-@@ -7693,6 +7721,7 @@ impl Worker {
+@@ -7693,6 +7730,7 @@ impl Worker {
              Command::DeleteLocal { chat, id } => {
                  self.delete_message_for_me(chat, id);
              }
@@ -643,7 +962,33 @@ index 18e5e9f..f52afbc 100644
              Command::MessageDeletedForMe {
                  generation,
                  chat,
-@@ -9126,6 +9155,19 @@ impl Worker {
+@@ -7793,7 +7831,13 @@ impl Worker {
+                 row,
+                 raw,
+                 turn,
+-            } => self.outbound(chat, *row, raw, turn),
++                hold,
++            } => {
++                self.outbound(chat, *row, raw, turn);
++                // Archived with the note of its send by now, which a closed
++                // window waits on from here.
++                drop(hold);
++            }
+             Command::SendSticker {
+                 chat,
+                 path,
+@@ -9084,6 +9128,10 @@ impl Worker {
+                 self.start_bot().await;
+             }
+             Command::Shutdown => {}
++            Command::SendsFinished(done) => {
++                self.send_waiters.push(done);
++                self.settle_send_waiters();
++            }
+             Command::OlderSent {
+                 chat,
+                 serial,
+@@ -9126,6 +9174,19 @@ impl Worker {
                      }
                      return;
                  }
@@ -663,7 +1008,7 @@ index 18e5e9f..f52afbc 100644
                  let status = match &error {
                      Some(_) => Delivery::Failed,
                      None => Delivery::Sent,
-@@ -9134,9 +9176,15 @@ impl Worker {
+@@ -9134,9 +9195,15 @@ impl Worker {
                      // A failed send is never acked; a retry stores the row again.
                      self.awaiting_ack.remove(&id);
                  }
@@ -681,7 +1026,7 @@ index 18e5e9f..f52afbc 100644
                  self.emit_message(&chat, &id);
                  self.emit_chat(&chat);
                  self.advance_serial_forward(&id);
-@@ -9830,6 +9878,72 @@ impl Worker {
+@@ -9830,6 +9897,97 @@ impl Worker {
          }));
      }
  
@@ -729,6 +1074,31 @@ index 18e5e9f..f52afbc 100644
 +        ));
 +    }
 +
++    /// Answers the closed windows waiting for this account's sends once
++    /// none is running: no attachment is on its way, and no message noted as
++    /// sending is still pending. A note that cannot be read holds nothing
++    /// up: quitting must not wait on the archive.
++    fn settle_send_waiters(&mut self) {
++        self.send_waiters.retain(|done| !done.is_closed());
++        if self.send_waiters.is_empty()
++            || Arc::strong_count(&self.send_holds) > 1
++            || self.archive.sends_running().unwrap_or(false)
++        {
++            return;
++        }
++        for done in self.send_waiters.drain(..) {
++            let _ = done.send(());
++        }
++    }
++
++    /// Holds the place of an attachment accepted for sending until it is
++    /// archived.
++    fn hold(&self) -> super::SendHold {
++        super::SendHold {
++            _shared: Arc::clone(&self.send_holds),
++        }
++    }
++
 +    /// Whether the server acknowledged a message of ours, or a receipt or a
 +    /// copy that was sent showed it went out.
 +    fn went_out(&self, chat: &str, id: &str) -> bool {
@@ -754,7 +1124,87 @@ index 18e5e9f..f52afbc 100644
      /// Sends a spot as a location, keeping the row locally the way a phone
      /// does, so the bubble shows before the phone acknowledges it.
      fn send_location(
-@@ -12536,6 +12650,13 @@ fn apply_ephemeral_expiration(message: &mut wa::Message, expiration: Option<u32>
+@@ -11833,6 +11991,7 @@ impl Worker {
+             // Like the caption, the reply belongs to the first file.
+             let quote = quote.take();
+             let commands = self.commands.clone();
++            let hold = self.hold();
+             let chat = chat.clone();
+             let dir = self.dirs.media_cache_dir();
+             let me = self.me();
+@@ -11912,6 +12071,7 @@ impl Worker {
+                             row: Box::new(row),
+                             raw,
+                             turn: Some(turn),
++                            hold,
+                         });
+                     }
+                     // Cancelled on purpose: nothing to tell.
+@@ -11968,6 +12128,7 @@ impl Worker {
+         }
+         let (previous, turn) = self.send_turn(&chat);
+         let commands = self.commands.clone();
++        let hold = self.hold();
+         let dir = self.dirs.media_cache_dir();
+         let me = self.me();
+         // A pasted picture has no name; the strip calls it a picture.
+@@ -12021,6 +12182,7 @@ impl Worker {
+                         row: Box::new(row),
+                         raw,
+                         turn: Some(turn),
++                        hold,
+                     });
+                 }
+                 Err(_) if uploading.cancelled() => {}
+@@ -12055,6 +12217,7 @@ impl Worker {
+             return;
+         };
+         let commands = self.commands.clone();
++        let hold = self.hold();
+         let dir = self.dirs.media_cache_dir();
+         let me = self.me();
+         tokio::spawn(async move {
+@@ -12082,6 +12245,7 @@ impl Worker {
+                         row: Box::new(row),
+                         raw,
+                         turn: None,
++                        hold,
+                     });
+                 }
+                 Err(error) => {
+@@ -12147,6 +12311,7 @@ impl Worker {
+             return;
+         };
+         let commands = self.commands.clone();
++        let hold = self.hold();
+         let dir = self.dirs.media_cache_dir();
+         let me = self.me();
+         tokio::spawn(async move {
+@@ -12165,6 +12330,7 @@ impl Worker {
+                         row: Box::new(row),
+                         raw,
+                         turn: None,
++                        hold,
+                     });
+                 }
+                 Err(error) => {
+@@ -12192,6 +12358,7 @@ impl Worker {
+             return;
+         };
+         let commands = self.commands.clone();
++        let hold = self.hold();
+         let dir = self.dirs.media_cache_dir();
+         let me = self.me();
+         tokio::spawn(async move {
+@@ -12226,6 +12393,7 @@ impl Worker {
+                         row: Box::new(row),
+                         raw,
+                         turn: None,
++                        hold,
+                     });
+                 }
+                 Err(error) => {
+@@ -12536,6 +12704,13 @@ fn apply_ephemeral_expiration(message: &mut wa::Message, expiration: Option<u32>
          .then_some(expiration)
  }
  
@@ -768,7 +1218,16 @@ index 18e5e9f..f52afbc 100644
  #[allow(clippy::too_many_arguments)]
  async fn send_outgoing(
      client: Arc<Client>,
-@@ -20894,6 +21015,183 @@ mod receipt_tests {
+@@ -20735,6 +20910,8 @@ mod receipt_tests {
+             interactive_sending: HashMap::new(),
+             awaiting_ack: HashMap::new(),
+             send_turns: HashMap::new(),
++            send_waiters: Vec::new(),
++            send_holds: Arc::new(()),
+             receipts_watch: None,
+             receipts_pruned: Instant::now(),
+             early: Default::default(),
+@@ -20894,6 +21071,183 @@ mod receipt_tests {
          }
      }
  
@@ -952,7 +1411,7 @@ index 18e5e9f..f52afbc 100644
      fn receipt(chat: &str, ids: &[&str], kind: ReceiptType) -> wa_events::Receipt {
          let chat: Jid = chat.parse().expect("jid");
          wa_events::Receipt::builder()
-@@ -22858,6 +23156,34 @@ mod receipt_tests {
+@@ -22858,6 +23212,34 @@ mod receipt_tests {
          );
      }
  
@@ -987,7 +1446,7 @@ index 18e5e9f..f52afbc 100644
      #[test]
      fn history_receipts_date_direct_ticks_and_fill_group_message_info() {
          use wa::web_message_info::Status;
-@@ -24115,6 +24441,85 @@ mod receipt_tests {
+@@ -24115,6 +24497,120 @@ mod receipt_tests {
          );
      }
  
@@ -1070,9 +1529,64 @@ index 18e5e9f..f52afbc 100644
 +        assert_eq!(stored.expect("stored").status, Delivery::Sent);
 +    }
 +
++    #[tokio::test]
++    async fn a_closed_window_hears_once_no_send_is_running() {
++        let (mut worker, _events, _inbox, _wa) = worker();
++        let (done, mut idle) = oneshot::channel();
++        worker.handle_command(Command::SendsFinished(done)).await;
++        assert_eq!(idle.try_recv(), Ok(()), "nothing sending: answered at once");
++
++        let pending = Message {
++            status: Delivery::Pending,
++            ..own_message("mine", 200)
++        };
++        worker.store_message(pending, None, None);
++        let (done, mut waiting) = oneshot::channel();
++        worker.handle_command(Command::SendsFinished(done)).await;
++        assert!(waiting.try_recv().is_err(), "a send is running");
++        worker
++            .handle_command(Command::Sent {
++                chat: PEER.into(),
++                id: "mine".into(),
++                error: None,
++            })
++            .await;
++        worker.settle_send_waiters();
++        assert_eq!(waiting.try_recv(), Ok(()));
++
++        // An attachment still uploading has no message yet.
++        let hold = worker.hold();
++        let (done, mut uploading) = oneshot::channel();
++        worker.handle_command(Command::SendsFinished(done)).await;
++        assert!(uploading.try_recv().is_err(), "an attachment is on its way");
++        drop(hold);
++        worker.settle_send_waiters();
++        assert_eq!(uploading.try_recv(), Ok(()));
++    }
++
      #[test]
      fn replying_on_the_phone_reads_only_preceding_messages() {
          let (mut worker, events, _inbox, _wa) = worker();
+diff --git a/src/backend/worker/stickers.rs b/src/backend/worker/stickers.rs
+index 131345f..f37151f 100644
+--- a/src/backend/worker/stickers.rs
++++ b/src/backend/worker/stickers.rs
+@@ -1082,6 +1082,7 @@ impl Worker {
+         };
+         let publisher = self.me_name.clone().unwrap_or_default();
+         let commands = self.commands.clone();
++        let hold = self.hold();
+         let media = self.dirs.media_cache_dir();
+         let me = self.me();
+         tokio::spawn(async move {
+@@ -1098,6 +1099,7 @@ impl Worker {
+                         row: Box::new(row),
+                         raw,
+                         turn: None,
++                        hold,
+                     });
+                 }
+                 Err(error) => {
 diff --git a/src/demo.rs b/src/demo.rs
 index 7376ee1..a2e560f 100644
 --- a/src/demo.rs
