@@ -24,10 +24,11 @@ if ! grep -qF "$old_dep" Cargo.toml; then
   exit 0
 fi
 
-manifest=$(<Cargo.toml)
-printf '%s\n' "${manifest/"$old_dep"/"$new_dep"}" > Cargo.toml
-lock=$(<Cargo.lock)
-printf '%s\n' "${lock//"$old_source"/"$new_source"}" > Cargo.lock
+# Literal replacements by perl: the bash 3.2 macOS ships takes hours over
+# ${lock//…} on a lockfile this size.
+OLD=$old_dep NEW=$new_dep perl -pi.bak -e 's/\Q$ENV{OLD}\E/$ENV{NEW}/' Cargo.toml
+OLD=$old_source NEW=$new_source perl -pi.bak -e 's/\Q$ENV{OLD}\E/$ENV{NEW}/g' Cargo.lock
+rm -f Cargo.toml.bak Cargo.lock.bak
 
 if grep -qF "$old_source" Cargo.lock || ! grep -qF "$new_source" Cargo.lock; then
   echo "::error title=whatsapp-rust pin::Cargo.lock still names the old whatsapp-rust source"

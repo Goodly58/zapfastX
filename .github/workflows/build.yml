@@ -116,13 +116,15 @@ jobs:
       # Upstream pins its toolchain; add the target to the pinned one.
       - run: rustup target add $env:TARGET
       # An optional patch that breaks the build is dropped and the build
-      # retried, so a release never waits on a look.
+      # retried, so a release never waits on a look. PowerShell, not bash:
+      # Git Bash's perl cannot configure the vendored OpenSSL.
       - name: Build
-        shell: bash
         run: |
-          cargo build --locked --release --target "$TARGET" || {
-            bash ../fork/scripts/drop-optional.sh
-            cargo build --locked --release --target "$TARGET"
+          cargo build --locked --release --target $env:TARGET
+          if ($LASTEXITCODE -ne 0) {
+            & "$env:ProgramFiles\Git\bin\bash.exe" ../fork/scripts/drop-optional.sh
+            if ($LASTEXITCODE -ne 0) { exit 1 }
+            cargo build --locked --release --target $env:TARGET
           }
 
       - name: Package
