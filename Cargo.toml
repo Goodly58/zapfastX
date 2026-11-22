@@ -80,7 +80,11 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png",
 # (#1870, #1880, #1883); ZapFast #1052. Back to crates.io once released. `voip` is the call stack:
 # signaling, the sans-IO media engine with MLOW and libopus codecs, and the
 # native UDP relay transport.
-whatsapp-rust = { git = "https://github.com/oxidezap/whatsapp-rust", rev = "719f29498124acaede51c555c8f1c7a1c423fb3d", default-features = false, features = ["sqlite-storage", "tokio-transport", "tokio-runtime", "ureq-client", "tokio-native", "voip"] }
+# ZapFastX: the rev above plus oxidezap/whatsapp-rust#2077 (6964809), cherry-picked
+# in Goodly58/whatsapp-rust, so the first send to a large group fetches members'
+# primary identity keys 8 at a time instead of one by one. Drop once upstream
+# moves past it.
+whatsapp-rust = { git = "https://github.com/Goodly58/whatsapp-rust", rev = "e4012e429c7fe7c00d89457e3f7d5ef15dd5af8b", default-features = false, features = ["sqlite-storage", "tokio-transport", "tokio-runtime", "ureq-client", "tokio-native", "voip"] }
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros", "fs", "net", "io-util"] }
 # Queue between the call's audio streams and the engine.
 async-channel = "2.5"
