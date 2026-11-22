@@ -115,7 +115,15 @@ jobs:
           targets: ${{ matrix.target }}
       # Upstream pins its toolchain; add the target to the pinned one.
       - run: rustup target add $env:TARGET
-      - run: cargo build --locked --release --target $env:TARGET
+      # An optional patch that breaks the build is dropped and the build
+      # retried, so a release never waits on a look.
+      - name: Build
+        shell: bash
+        run: |
+          cargo build --locked --release --target "$TARGET" || {
+            bash ../fork/scripts/drop-optional.sh
+            cargo build --locked --release --target "$TARGET"
+          }
 
       - name: Package
         shell: bash
@@ -215,8 +223,12 @@ jobs:
       - run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
       - name: Build both architectures
         run: |
-          cargo build --locked --release --target aarch64-apple-darwin
-          cargo build --locked --release --target x86_64-apple-darwin
+          build() {
+            cargo build --locked --release --target aarch64-apple-darwin &&
+              cargo build --locked --release --target x86_64-apple-darwin
+          }
+          # As on Windows, without an optional patch that breaks the build.
+          build || { bash ../fork/scripts/drop-optional.sh && build; }
       - name: Universal binary
         run: |
           mkdir -p universal

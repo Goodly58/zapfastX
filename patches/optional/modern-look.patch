@@ -1,0 +1,401 @@
+diff --git a/src/app.rs b/src/app.rs
+index 5513483..88e264c 100644
+--- a/src/app.rs
++++ b/src/app.rs
+@@ -1610,6 +1610,8 @@ impl App {
+                 ThemeChoice::Messages => Palette::messages(),
+                 _ => Palette::dark(),
+             });
++        crate::modern::set(settings.modern_look);
++        let palette = crate::modern::restyle(palette);
+         let locale = crate::i18n::resolve(settings.interface_language);
+         // With a password set, ZapFast starts locked.
+         let app_lock = crate::app_lock::AppLock::new(settings.app_lock_hash.is_some());
+@@ -7407,6 +7409,8 @@ impl App {
+                 Palette::light()
+             }
+         });
++        crate::modern::set(self.settings.modern_look);
++        let palette = crate::modern::restyle(palette);
+         if crate::theme::apply_text_rendering_change(ctx) {
+             self.applied_dark = None;
+         }
+diff --git a/src/demo.rs b/src/demo.rs
+index a2e560f..856e7c0 100644
+--- a/src/demo.rs
++++ b/src/demo.rs
+@@ -3319,6 +3319,13 @@ pub fn apply_flags(app: &mut App, page: Option<&str>) {
+             "light" => {
+                 app.settings.theme = ThemeChoice::Light;
+             }
++            // ZapFastX: the Modern look, in either theme.
++            "dark" => {
++                app.settings.theme = ThemeChoice::Dark;
++            }
++            "modern" => {
++                app.settings.modern_look = true;
++            }
+             "messages" => {
+                 app.settings.theme = ThemeChoice::Messages;
+             }
+diff --git a/src/lib.rs b/src/lib.rs
+index d5bbe7f..f55d895 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -42,6 +42,7 @@ pub mod media_cleanup;
+ pub mod media_pause;
+ pub mod mentions;
+ pub mod model;
++pub mod modern;
+ pub mod motion;
+ pub mod nav;
+ pub mod new_group;
+diff --git a/src/modern.rs b/src/modern.rs
+new file mode 100644
+index 0000000..7390bd5
+--- /dev/null
++++ b/src/modern.rs
+@@ -0,0 +1,253 @@
++//! ZapFastX's Modern look, a toggle in Settings → Appearance.
++//!
++//! It turns on the glass ZapFast already draws for its Messages theme (a
++//! frosted header with its name and buttons on pills, a glass composer and
++//! day chips, and on Windows 11 the desktop's Mica behind the window) for
++//! every theme. It also swaps ZapFast's own light and dark palettes for
++//! neutral greys, draws message bubbles flat and rounder with a hairline
++//! edge, and floats the conversation in a rounded card. Custom themes and
++//! Messages keep their colours. Off, ZapFast looks exactly as upstream.
++//!
++//! Everything lives here, so the upstream files only call in at a handful
++//! of points.
++
++use std::sync::atomic::{AtomicBool, Ordering};
++
++use egui::{Color32, CornerRadius, Frame, Margin, Rect, Shape, Stroke, StrokeKind};
++
++use crate::theme::{BubbleStyle, Palette};
++use crate::ui::widgets::Side;
++
++static ON: AtomicBool = AtomicBool::new(false);
++
++/// Whether the Modern look is on. Read while drawing, so a change shows on
++/// the next frame.
++pub fn on() -> bool {
++    ON.load(Ordering::Relaxed)
++}
++
++/// Follows the setting. Called with the theme, each frame and at start.
++pub fn set(on: bool) {
++    ON.store(on, Ordering::Relaxed);
++}
++
++/// The palette the interface draws with: ZapFast's own light and dark
++/// palettes become Modern's neutral ones while the look is on. Messages and
++/// custom themes keep their colours.
++pub fn restyle(palette: Palette) -> Palette {
++    restyle_for(on(), palette)
++}
++
++fn restyle_for(on: bool, palette: Palette) -> Palette {
++    if !on {
++        palette
++    } else if palette == Palette::dark() {
++        dark()
++    } else if palette == Palette::light() {
++        light()
++    } else {
++        palette
++    }
++}
++
++/// Near-black neutral greys, with WhatsApp's green kept for the accent.
++pub fn dark() -> Palette {
++    Palette {
++        dark: true,
++        window: Color32::from_rgb(0x0e, 0x0e, 0x10),
++        panel: Color32::from_rgb(0x0e, 0x0e, 0x10),
++        surface: Color32::from_rgb(0x1c, 0x1c, 0x1f),
++        surface_hover: Color32::from_rgb(0x24, 0x24, 0x28),
++        surface_active: Color32::from_rgb(0x2d, 0x2d, 0x32),
++        outline: Color32::from_rgb(0x23, 0x23, 0x27),
++        text: Color32::from_rgb(0xec, 0xec, 0xf0),
++        secondary: Color32::from_rgb(0xa1, 0xa1, 0xa9),
++        dim: Color32::from_rgb(0x8e, 0x8e, 0x96),
++        accent: Color32::from_rgb(0x21, 0xc0, 0x63),
++        accent_hover: Color32::from_rgb(0x3a, 0xd5, 0x7a),
++        on_accent: Color32::from_rgb(0x0b, 0x0b, 0x0c),
++        danger: Color32::from_rgb(0xff, 0x5c, 0x6c),
++        warning: Color32::from_rgb(0xff, 0xd2, 0x79),
++        overlay: Color32::from_rgb(0x1e, 0x1e, 0x22),
++        shadow: Color32::from_black_alpha(150),
++        chat: Color32::from_rgb(0x14, 0x14, 0x17),
++        bubble_in: Color32::from_rgb(0x22, 0x22, 0x26),
++        bubble_out: Color32::from_rgb(0x30, 0x30, 0x36),
++        link: Color32::from_rgb(0x6c, 0xb6, 0xff),
++        read: Color32::from_rgb(0x53, 0xbd, 0xeb),
++        bubbles: BubbleStyle::WhatsApp,
++    }
++}
++
++/// Clean whites and light neutral greys, in place of WhatsApp's beige
++/// wallpaper and mint bubbles.
++pub fn light() -> Palette {
++    Palette {
++        dark: false,
++        window: Color32::from_rgb(0xf3, 0xf3, 0xf5),
++        panel: Color32::from_rgb(0xf3, 0xf3, 0xf5),
++        surface: Color32::from_rgb(0xe8, 0xe8, 0xeb),
++        surface_hover: Color32::from_rgb(0xe0, 0xe0, 0xe4),
++        surface_active: Color32::from_rgb(0xd6, 0xd6, 0xdb),
++        outline: Color32::from_rgb(0xe2, 0xe2, 0xe6),
++        text: Color32::from_rgb(0x11, 0x11, 0x13),
++        secondary: Color32::from_rgb(0x55, 0x55, 0x5c),
++        dim: Color32::from_rgb(0x62, 0x62, 0x69),
++        accent: Color32::from_rgb(0x16, 0x8a, 0x4b),
++        accent_hover: Color32::from_rgb(0x11, 0x74, 0x3f),
++        on_accent: Color32::WHITE,
++        danger: Color32::from_rgb(0xd7, 0x00, 0x22),
++        warning: Color32::from_rgb(0xa0, 0x5a, 0x00),
++        overlay: Color32::WHITE,
++        shadow: Color32::from_black_alpha(40),
++        chat: Color32::from_rgb(0xfa, 0xfa, 0xfb),
++        bubble_in: Color32::WHITE,
++        bubble_out: Color32::from_rgb(0xec, 0xec, 0xef),
++        link: Color32::from_rgb(0x0a, 0x66, 0xc2),
++        read: Color32::from_rgb(0x02, 0x7e, 0xb5),
++        bubbles: BubbleStyle::WhatsApp,
++    }
++}
++
++/// How round a Modern bubble is.
++pub const BUBBLE_RADIUS: u8 = 16;
++/// The corner toward the sender on the first message of a run, where
++/// WhatsApp draws its tail.
++const TAIL_CORNER: u8 = 5;
++
++/// A Modern message bubble: flat, rounder, with a hairline edge and no
++/// tail, the first of a run only a little squarer toward its sender. `None`
++/// while the look is off or for Messages' own balloons.
++pub fn bubble(palette: &Palette, rect: Rect, fill: Color32, tail: Option<Side>) -> Option<Shape> {
++    bubble_for(on(), palette, rect, fill, tail)
++}
++
++fn bubble_for(
++    on: bool,
++    palette: &Palette,
++    rect: Rect,
++    fill: Color32,
++    tail: Option<Side>,
++) -> Option<Shape> {
++    if !on || palette.bubbles != BubbleStyle::WhatsApp {
++        return None;
++    }
++    let mut corners = CornerRadius::same(BUBBLE_RADIUS);
++    match tail {
++        Some(Side::Left) => corners.nw = TAIL_CORNER,
++        Some(Side::Right) => corners.ne = TAIL_CORNER,
++        None => {}
++    }
++    Some(Shape::Vec(vec![
++        Shape::rect_filled(rect, corners, fill),
++        Shape::rect_stroke(rect, corners, edge(palette), StrokeKind::Inside),
++    ]))
++}
++
++/// The hairline around bubbles and the card.
++fn edge(palette: &Palette) -> Stroke {
++    Stroke::new(
++        1.0,
++        palette
++            .text
++            .gamma_multiply(if palette.dark { 0.07 } else { 0.09 }),
++    )
++}
++
++/// Space around the floating card.
++const CARD_MARGIN: i8 = 8;
++/// How round the card's corners are.
++const CARD_RADIUS: u8 = 14;
++
++/// The central panel's frame: inset from the window while the look is on,
++/// so the page floats in a card beside the chat list.
++pub fn card(frame: Frame) -> Frame {
++    if on() {
++        frame.outer_margin(Margin {
++            left: 0,
++            right: CARD_MARGIN,
++            top: CARD_MARGIN,
++            bottom: CARD_MARGIN,
++        })
++    } else {
++        frame
++    }
++}
++
++/// Rounds the card once its page is drawn: the window's colour fills the
++/// corners outside the curve, and a hairline traces the edge. `panel` is
++/// the central panel's whole rect, margin included.
++pub fn round_card(ui: &egui::Ui, palette: &Palette, panel: Rect) {
++    if !on() {
++        return;
++    }
++    let card = Rect::from_min_max(
++        panel.min + egui::vec2(0.0, f32::from(CARD_MARGIN)),
++        panel.max - egui::vec2(f32::from(CARD_MARGIN), f32::from(CARD_MARGIN)),
++    );
++    let painter = ui.painter().with_clip_rect(panel);
++    let ground = palette.window;
++    // The margin itself, which the page under it may have painted over.
++    for strip in [
++        Rect::from_min_max(panel.min, egui::pos2(panel.max.x, card.min.y)),
++        Rect::from_min_max(egui::pos2(panel.min.x, card.max.y), panel.max),
++        Rect::from_min_max(egui::pos2(card.max.x, panel.min.y), panel.max),
++    ] {
++        painter.rect_filled(strip, CornerRadius::ZERO, ground);
++    }
++    let radius = f32::from(CARD_RADIUS);
++    for (corner, toward) in [
++        (card.left_top(), egui::vec2(1.0, 1.0)),
++        (card.right_top(), egui::vec2(-1.0, 1.0)),
++        (card.left_bottom(), egui::vec2(1.0, -1.0)),
++        (card.right_bottom(), egui::vec2(-1.0, -1.0)),
++    ] {
++        painter.add(corner_outside(corner, toward, radius, ground));
++    }
++    painter.rect_stroke(card, CARD_RADIUS, edge(palette), StrokeKind::Inside);
++}
++
++/// The sliver between a square corner and the quarter circle that rounds
++/// it, as a fan of triangles from the corner: the sliver is not convex, so
++/// egui's convex fill would smear it. The hairline drawn over the arc
++/// smooths its edge.
++fn corner_outside(corner: egui::Pos2, toward: egui::Vec2, radius: f32, color: Color32) -> Shape {
++    const STEPS: u32 = 12;
++    let center = corner + toward * radius;
++    let mut mesh = egui::Mesh::default();
++    mesh.colored_vertex(corner, color);
++    for step in 0..=STEPS {
++        let angle = std::f32::consts::FRAC_PI_2 * step as f32 / STEPS as f32;
++        // From the edge along x to the edge along y, bulging toward the corner.
++        let offset = egui::vec2(-toward.x * angle.cos(), -toward.y * angle.sin()) * radius;
++        mesh.colored_vertex(center + offset, color);
++        if step > 0 {
++            mesh.add_triangle(0, step, step + 1);
++        }
++    }
++    Shape::mesh(mesh)
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    // The switch is global, so these check the pure halves and never flip
++    // it under tests running beside them.
++
++    #[test]
++    fn off_leaves_every_palette_and_bubble_alone() {
++        assert_eq!(restyle_for(false, Palette::dark()), Palette::dark());
++        assert_eq!(restyle_for(false, Palette::light()), Palette::light());
++        assert!(bubble_for(false, &Palette::dark(), Rect::ZERO, Color32::RED, None).is_none());
++    }
++
++    #[test]
++    fn on_swaps_only_zapfasts_own_palettes() {
++        assert_eq!(restyle_for(true, Palette::dark()), dark());
++        assert_eq!(restyle_for(true, Palette::light()), light());
++        assert_eq!(restyle_for(true, Palette::messages()), Palette::messages());
++        assert!(bubble_for(true, &Palette::messages(), Rect::ZERO, Color32::RED, None).is_none());
++        assert!(bubble_for(true, &dark(), Rect::ZERO, Color32::RED, None).is_some());
++    }
++}
+diff --git a/src/settings.rs b/src/settings.rs
+index 0241f33..f9f8b0c 100644
+--- a/src/settings.rs
++++ b/src/settings.rs
+@@ -462,6 +462,8 @@ pub struct Settings {
+     #[serde(default)]
+     pub version: u32,
+     pub theme: ThemeChoice,
++    /// ZapFastX's Modern look (see `crate::modern`).
++    pub modern_look: bool,
+     /// Whether a `"system"` theme is really Messages. The file says
+     /// `"system"` for Messages, which releases before it read as Follow
+     /// system instead of rejecting the whole file; this marks the rest.
+@@ -617,6 +619,7 @@ impl Default for Settings {
+         Self {
+             version: SETTINGS_VERSION,
+             theme: ThemeChoice::System,
++            modern_look: false,
+             messages_theme: false,
+             font: FontChoice::System,
+             custom_titlebar: false,
+diff --git a/src/theme.rs b/src/theme.rs
+index d51b5a5..fb5fa07 100644
+--- a/src/theme.rs
++++ b/src/theme.rs
+@@ -254,7 +254,7 @@ impl Palette {
+     /// pills and tints, on every platform. Whether the desktop also shows
+     /// through the window is [`crate::backdrop::active`].
+     pub fn vibrant(&self) -> bool {
+-        self.bubbles == BubbleStyle::Messages
++        self.bubbles == BubbleStyle::Messages || crate::modern::on()
+     }
+ 
+     /// The chat list's background. Over a window's material it only darkens
+diff --git a/src/ui/mod.rs b/src/ui/mod.rs
+index 9f4b177..625d653 100644
+--- a/src/ui/mod.rs
++++ b/src/ui/mod.rs
+@@ -178,8 +178,8 @@ fn main_view(app: &mut App, ui: &mut egui::Ui, list_only: bool) {
+     }
+     let search_overlay = pane::show(app, ui);
+     let info_overlay = info::show(app, ui);
+-    egui::CentralPanel::default()
+-        .frame(central_frame(app))
++    let central = egui::CentralPanel::default()
++        .frame(crate::modern::card(central_frame(app)))
+         .show(ui, |ui| {
+             // The top of every page drags the window, beneath its own
+             // widgets: the empty pane, Settings, and the Calls tab's start.
+@@ -200,6 +200,7 @@ fn main_view(app: &mut App, ui: &mut egui::Ui, list_only: bool) {
+                 Page::Wallpaper => settings::wallpaper_show(app, ui),
+             }
+         });
++    crate::modern::round_card(ui, &app.palette, central.response.rect);
+     if let Some(region) = search_overlay {
+         pane::show_overlay(app, ui.ctx(), region);
+     }
+diff --git a/src/ui/settings.rs b/src/ui/settings.rs
+index 6c2a6df..daeff44 100644
+--- a/src/ui/settings.rs
++++ b/src/ui/settings.rs
+@@ -351,6 +351,14 @@ fn sections(app: &App) -> Vec<Section> {
+         Text::default()
+     };
+     appearance.row(translated(locale, "Theme"), detail, theme_picker);
++    appearance.toggle(
++        translated(locale, "Modern look"),
++        translated(
++            locale,
++            "Neutral colours, glass bars, rounder bubbles and the chat in a floating card.",
++        ),
++        |settings| &mut settings.modern_look,
++    );
+     appearance.row(
+         translated(locale, "Font"),
+         translated(
+diff --git a/src/ui/widgets.rs b/src/ui/widgets.rs
+index a7b87de..8b1f200 100644
+--- a/src/ui/widgets.rs
++++ b/src/ui/widgets.rs
+@@ -1509,6 +1509,9 @@ pub fn bubble_shape(
+     pixels_per_point: f32,
+     screen: egui::Rangef,
+ ) -> egui::Shape {
++    if let Some(shape) = crate::modern::bubble(palette, rect, fill, tail) {
++        return shape;
++    }
+     if palette.bubbles == theme::BubbleStyle::Messages {
+         // Your own balloons run from the palette's colour at the top of the
+         // view to a deeper one at its bottom, as ChatKit's dynamic gradient

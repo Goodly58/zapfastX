@@ -3,10 +3,11 @@
 [ZapFast](https://github.com/crmne/zapfast) for Windows and macOS with a few patches on top. This isn't a separate app: every new ZapFast release is picked up, patched and published here automatically, so you get all of upstream's updates. Differences from upstream:
 
 - **Read ticks always show**, even with your account's read receipts off.
-- **Deleted messages stay.** Messages others delete for everyone are kept and marked *deleted*. Photos and voice notes download as they arrive, so deleted ones are kept too.
+- **Deleted messages stay.** Messages others delete for everyone are kept and marked *deleted*, or covered with who deleted them until you hover (Settings → Chats). With **Download files automatically** on, photos and voice notes download as they arrive, so deleted ones are kept too.
 - **Edits keep their history.** Hover *edited* on someone's message to see what it said before.
 - **Screen privacy.** Covers chats, messages, media, names and avatars until hovered (Ctrl+Shift+H, off by default). By [paulo1403](https://github.com/paulo1403) ([crmne/zapfast#451](https://github.com/crmne/zapfast/pull/451)), via [ZapFaster](https://github.com/eternalwaitt/zap-faster).
 - **Ghost mode.** Never shows you as online (Settings → Privacy, off by default).
+- **Modern look.** Neutral greys in place of WhatsApp's tints, glass bars, rounder bubbles and the chat in a floating card (Settings → Appearance, off by default).
 - **Scheduled messages.** Right-click Send to send text, photos or files later, up to a week ahead. Waiting messages sit above the composer until they go.
 - **Updates come from this repository**, so they keep these changes.
 

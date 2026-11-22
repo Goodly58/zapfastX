@@ -1,0 +1,335 @@
+diff --git a/src/app.rs b/src/app.rs
+index 859bc4f..5513483 100644
+--- a/src/app.rs
++++ b/src/app.rs
+@@ -6220,6 +6220,7 @@ impl App {
+             known.unread_mention = None;
+         }
+         // Clear local unread state regardless of receipt settings.
++        crate::group_reads::set(self.settings.sync_group_reads);
+         self.backend.send(Command::MarkRead {
+             chat: chat.to_owned(),
+             receipts: self.account().settings.send_read_receipts,
+@@ -11566,6 +11567,9 @@ impl App {
+             ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+         }
+         self.settle_pending_reply();
++        // ZapFastX switches the backend and the transcript read while drawing.
++        crate::kept_revokes::set_cover(self.settings.cover_deleted);
++        crate::kept_revokes::set_fetch(self.account().settings.auto_download);
+         self.copy_rows
+             .lock()
+             .unwrap_or_else(|p| p.into_inner())
+diff --git a/src/backend/worker.rs b/src/backend/worker.rs
+index f1f2e3c..29a8684 100644
+--- a/src/backend/worker.rs
++++ b/src/backend/worker.rs
+@@ -5353,8 +5353,9 @@ impl Worker {
+                     // replace what the phone did since.
+                     self.edits.remove(&(chat.clone(), target.clone()));
+                     // Patched build: keep what others delete for everyone.
+-                    if old.as_ref().is_some_and(crate::kept_revokes::keeps) {
++                    if let Some(kept) = old.as_ref().filter(|old| crate::kept_revokes::keeps(old)) {
+                         crate::kept_revokes::remember(&self.archive, &chat, &target);
++                        crate::kept_revokes::remember_revoker(&self.archive, &chat, kept, &sender);
+                         self.emit_message(&chat, &target);
+                     } else if let Ok(true) =
+                         self.archive
+@@ -10348,6 +10349,16 @@ impl Worker {
+         if row.unread == 0 && !row.marked_unread {
+             return;
+         }
++        // A group read reaching the phone makes the phone send the group its
++        // read receipts, which WhatsApp's own apps always do in groups. So
++        // while receipts are off the phone isn't told, and keeps the group
++        // unread, unless Settings asks for it (see `crate::group_reads`).
++        if !receipts
++            && !crate::group_reads::sync()
++            && Self::jid_of(&chat).is_some_and(|jid| jid.is_group())
++        {
++            return;
++        }
+         let _ = self.archive.queue_read_sync(&chat);
+         self.pump_read_sync();
+         self.send_read_receipts(chat, ids);
+@@ -24235,6 +24246,29 @@ mod receipt_tests {
+         );
+     }
+ 
++    #[test]
++    fn reading_a_group_without_blue_ticks_keeps_it_off_the_phone() {
++        const GROUP: &str = "120363000000000002@g.us";
++        let (mut worker, _events, _inbox, _wa) = worker();
++        let in_group = |id: &str, timestamp| Message {
++            chat: GROUP.into(),
++            ..incoming(id, timestamp)
++        };
++        worker.store_message(in_group("a", 100), None, None);
++        worker.mark_read(GROUP.into(), false);
++        assert_eq!(worker.archive.chat(GROUP).unwrap().unwrap().unread, 0);
++        assert!(
++            worker.archive.pending_reads().unwrap().is_empty(),
++            "the phone would send the group its read receipts"
++        );
++        worker.store_message(in_group("b", 200), None, None);
++        worker.mark_read(GROUP.into(), true);
++        assert_eq!(
++            worker.archive.pending_reads().unwrap(),
++            vec![(GROUP.into(), 200)]
++        );
++    }
++
+     #[tokio::test]
+     async fn a_failed_read_sync_stays_queued_until_it_succeeds() {
+         let (mut worker, _events, _inbox, _wa) = worker();
+diff --git a/src/group_reads.rs b/src/group_reads.rs
+new file mode 100644
+index 0000000..2ed3d65
+--- /dev/null
++++ b/src/group_reads.rs
+@@ -0,0 +1,18 @@
++//! ZapFastX: whether reading a group here tells the phone while read
++//! receipts are off. The phone applies the read and then sends the group its
++//! read receipts itself, as WhatsApp's own apps always do in groups, so by
++//! default it is not told and keeps the group unread.
++
++use std::sync::atomic::{AtomicBool, Ordering};
++
++static SYNC: AtomicBool = AtomicBool::new(false);
++
++/// Follows Settings → Privacy → Sync group reads to phone.
++pub fn set(sync: bool) {
++    SYNC.store(sync, Ordering::Relaxed);
++}
++
++/// Whether a group read here goes to the phone with receipts off.
++pub fn sync() -> bool {
++    SYNC.load(Ordering::Relaxed)
++}
+diff --git a/src/kept_revokes.rs b/src/kept_revokes.rs
+index c37a9ae..8b40980 100644
+--- a/src/kept_revokes.rs
++++ b/src/kept_revokes.rs
+@@ -5,13 +5,22 @@
+ //! the mark survives restarts. The set is process-wide: the backend fills it
+ //! and the conversation reads it while drawing footers.
+ 
+-use std::collections::HashSet;
++use std::collections::{HashMap, HashSet};
++use std::sync::atomic::{AtomicBool, Ordering};
+ use std::sync::{Mutex, OnceLock, PoisonError};
+ 
+ use crate::archive::Archive;
+ use crate::model::{Content, Message};
+ 
+ const META_KEY: &str = "fork_kept_revokes";
++/// Who deleted a kept message, `chat\tid\twho` per line, kept only when it
++/// was not its sender (a group admin).
++const REVOKERS_KEY: &str = "fork_kept_revokers";
++
++fn revokers() -> &'static Mutex<HashMap<String, String>> {
++    static REVOKERS: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
++    REVOKERS.get_or_init(Default::default)
++}
+ 
+ fn kept() -> &'static Mutex<HashSet<String>> {
+     static KEPT: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+@@ -36,6 +45,84 @@ pub fn load(archive: &Archive) {
+     };
+     let mut kept = kept().lock().unwrap_or_else(PoisonError::into_inner);
+     kept.extend(stored.lines().map(str::to_owned));
++    let Ok(Some(stored)) = archive.meta(REVOKERS_KEY) else {
++        return;
++    };
++    let mut revokers = revokers().lock().unwrap_or_else(PoisonError::into_inner);
++    for entry in stored.lines() {
++        if let Some((line, who)) = entry.rsplit_once('\t') {
++            revokers.insert(line.to_owned(), who.to_owned());
++        }
++    }
++}
++
++/// Notes who deleted `old` for everyone when it was not its sender, as a
++/// group admin can, so the cover can name them.
++pub fn remember_revoker(archive: &Archive, chat: &str, old: &Message, who: &str) {
++    if old.sender == who {
++        return;
++    }
++    let line = line(chat, &old.id);
++    revokers()
++        .lock()
++        .unwrap_or_else(PoisonError::into_inner)
++        .insert(line.clone(), who.to_owned());
++    let entry = format!("{line}\t{who}");
++    let stored = archive
++        .meta(REVOKERS_KEY)
++        .ok()
++        .flatten()
++        .unwrap_or_default();
++    if stored.lines().any(|kept| kept == entry) {
++        return;
++    }
++    let value = if stored.is_empty() {
++        entry
++    } else {
++        format!("{stored}\n{entry}")
++    };
++    if let Err(error) = archive.set_meta(REVOKERS_KEY, &value) {
++        log::warn!("could not save who deleted a message: {error}");
++    }
++}
++
++/// Who deleted a kept message: its sender, unless someone else did.
++pub fn revoker(message: &Message) -> String {
++    revokers()
++        .lock()
++        .unwrap_or_else(PoisonError::into_inner)
++        .get(&line(&message.chat, &message.id))
++        .cloned()
++        .unwrap_or_else(|| message.sender.clone())
++}
++
++static COVER: AtomicBool = AtomicBool::new(false);
++
++/// Follows Settings → Chats → Cover deleted messages.
++pub fn set_cover(on: bool) {
++    COVER.store(on, Ordering::Relaxed);
++}
++
++/// Covers a kept message until it is hovered, with who deleted it, while
++/// Settings asks for it. `name` is that person's name as the chat shows it.
++pub fn cover(
++    ui: &egui::Ui,
++    palette: &crate::theme::Palette,
++    rect: egui::Rect,
++    hovered: bool,
++    name: &str,
++) {
++    if !COVER.load(Ordering::Relaxed) || hovered {
++        return;
++    }
++    crate::ui::widgets::privacy_cover(ui, rect, palette.surface_hover, 10.0);
++    ui.painter().with_clip_rect(rect).text(
++        rect.left_center() + egui::vec2(12.0, 0.0),
++        egui::Align2::LEFT_CENTER,
++        format!("Deleted by {name}"),
++        crate::theme::regular(13.5),
++        palette.secondary,
++    );
+ }
+ 
+ /// Marks a message its sender deleted for everyone and saves the mark.
+@@ -59,10 +146,22 @@ pub fn remember(archive: &Archive, chat: &str, id: &str) {
+     }
+ }
+ 
++static FETCH: AtomicBool = AtomicBool::new(true);
++
++/// Follows the account's Download files automatically: with it off, photos
++/// and voice notes wait to be opened, as upstream intends, and one deleted
++/// before then is gone.
++pub fn set_fetch(on: bool) {
++    FETCH.store(on, Ordering::Relaxed);
++}
++
+ /// Whether an incoming attachment is fetched as soon as it arrives, so a
+ /// later delete for everyone cannot take it: photos and voice notes within
+ /// the automatic download limit that are not on disk yet.
+ pub fn fetch_on_arrival(content: &Content) -> bool {
++    if !FETCH.load(Ordering::Relaxed) {
++        return false;
++    }
+     match content {
+         Content::Image { media, .. }
+         | Content::Audio {
+diff --git a/src/lib.rs b/src/lib.rs
+index 5678b6c..d5bbe7f 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -28,6 +28,7 @@ pub mod diagnostics;
+ pub mod emoji;
+ pub mod geo;
+ pub mod group_admin;
++pub mod group_reads;
+ pub mod i18n;
+ pub mod image_cache;
+ pub mod image_preview;
+diff --git a/src/settings.rs b/src/settings.rs
+index b9f86b6..0241f33 100644
+--- a/src/settings.rs
++++ b/src/settings.rs
+@@ -509,6 +509,11 @@ pub struct Settings {
+     pub auto_download: bool,
+     /// Show the default doodle wallpaper behind conversations.
+     pub show_wallpaper: bool,
++    /// ZapFastX: tell the phone about groups read here even with read
++    /// receipts off (see `crate::group_reads`).
++    pub sync_group_reads: bool,
++    /// ZapFastX: cover messages deleted for everyone until hovered.
++    pub cover_deleted: bool,
+     /// Colour selected in the wallpaper picker.
+     pub wallpaper_color: WallpaperColor,
+     /// Colour selected for the dark wallpaper picker.
+@@ -628,6 +633,8 @@ impl Default for Settings {
+             send_typing: true,
+             auto_download: true,
+             show_wallpaper: true,
++            sync_group_reads: false,
++            cover_deleted: false,
+             wallpaper_color: WallpaperColor::Theme,
+             dark_wallpaper_color: WallpaperColor::Theme,
+             wallpaper_image: None,
+diff --git a/src/ui/conversation.rs b/src/ui/conversation.rs
+index f33a199..1d75482 100644
+--- a/src/ui/conversation.rs
++++ b/src/ui/conversation.rs
+@@ -5236,6 +5236,15 @@ fn bubble(
+         if view.screen_privacy.hides(what, response.hovered()) {
+             widgets::privacy_cover(ui, response.rect, view.palette.surface_hover, 10.0);
+         }
++        if crate::kept_revokes::contains(&message.chat, &message.id) {
++            let who = crate::kept_revokes::revoker(message);
++            // The sender's push name helps only when the sender deleted it.
++            let hint = (who == message.sender)
++                .then_some(message.sender_name.as_deref())
++                .flatten();
++            let name = (view.names_or)(&who, hint);
++            crate::kept_revokes::cover(ui, &view.palette, response.rect, response.hovered(), &name);
++        }
+     }
+     response
+ }
+diff --git a/src/ui/settings.rs b/src/ui/settings.rs
+index bbf8968..6c2a6df 100644
+--- a/src/ui/settings.rs
++++ b/src/ui/settings.rs
+@@ -426,6 +426,14 @@ fn sections(app: &App) -> Vec<Section> {
+     }
+ 
+     let mut chats = Section::new(translated(locale, "Chats"));
++    chats.toggle(
++        translated(locale, "Cover deleted messages"),
++        translated(
++            locale,
++            "Messages deleted for everyone stay, covered with who deleted them until you hover. Off shows them, marked deleted.",
++        ),
++        |settings| &mut settings.cover_deleted,
++    );
+     chats.toggle(
+         translated(locale, "Enter sends"),
+         keyed(translated(locale, "When off, Ctrl+Enter sends.")),
+@@ -583,6 +591,14 @@ fn sections(app: &App) -> Vec<Section> {
+         receipts_note,
+         |settings| &mut settings.send_read_receipts,
+     );
++    privacy.toggle(
++        translated(locale, "Sync group reads to phone"),
++        translated(
++            locale,
++            "With read receipts off, a group you read here stays unread on your phone. On clears it there too, but your phone then sends the group your read receipts.",
++        ),
++        |settings| &mut settings.sync_group_reads,
++    );
+     privacy.account_toggle(
+         translated(locale, "Show when you are typing"),
+         "",
