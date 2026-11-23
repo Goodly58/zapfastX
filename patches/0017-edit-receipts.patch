@@ -1,0 +1,384 @@
+diff --git a/src/backend/worker.rs b/src/backend/worker.rs
+index 29a8684..5fa0254 100644
+--- a/src/backend/worker.rs
++++ b/src/backend/worker.rs
+@@ -1111,6 +1111,7 @@ pub async fn run(
+     worker.load_state();
+     crate::kept_revokes::load(&worker.archive);
+     crate::kept_edits::load(&worker.archive);
++    crate::edit_receipts::load(&worker.archive);
+     crate::scheduled::load(&worker.archive, &worker.dirs.id, &worker.dirs.state);
+     worker.backfill();
+     worker.backfill_lottie_stickers();
+@@ -4951,6 +4952,8 @@ impl Worker {
+             receipt.offline,
+             receipt.message_ids
+         );
++        // Patched build: a receipt for one of our edits counts for its message.
++        let message_ids = crate::edit_receipts::resolve(&chat, &receipt.message_ids);
+         let status = match receipt.r#type {
+             ReceiptType::Delivered => Delivery::Delivered,
+             // An inactive-device receipt still means delivered.
+@@ -4962,7 +4965,7 @@ impl Worker {
+                 // The receipt time is when the phone read, not the position
+                 // it read through. A delayed receipt must leave newer messages.
+                 let mut read = vec![chat.clone()];
+-                for id in &receipt.message_ids {
++                for id in &message_ids {
+                     // A contact's broadcast-list message is filed in the chat
+                     // with them, while its read names the list.
+                     let chat = if receipt.source.chat.is_broadcast_list() {
+@@ -5007,7 +5010,7 @@ impl Worker {
+             if self.is_me(&recipient) {
+                 return;
+             }
+-            for id in &receipt.message_ids {
++            for id in &message_ids {
+                 // A receipt for a message we have not archived yet is kept
+                 // until the message arrives; see `settle_early_receipts`.
+                 if self
+@@ -5036,7 +5039,7 @@ impl Worker {
+         }
+         let mut newest = 0;
+         let mut changed = 0;
+-        for id in &receipt.message_ids {
++        for id in &message_ids {
+             if !receipt.source.chat.is_status_broadcast()
+                 && matches!(self.archive.message(&chat, id), Ok(None))
+             {
+@@ -5060,7 +5063,7 @@ impl Worker {
+         }
+         log::debug!(
+             "receipt moved {changed} of {} messages in {chat} to {status:?}",
+-            receipt.message_ids.len()
++            message_ids.len()
+         );
+         // Read receipts advance all earlier messages.
+         if status >= Delivery::Read
+@@ -5368,6 +5371,24 @@ impl Worker {
+                 }
+                 Some(Type::MESSAGE_EDIT) => {
+                     self.edits.remove(&(chat.clone(), target.clone()));
++                    // Patched build: receipts for our phone's edit count for
++                    // the message, including any that came before the edit.
++                    if from_me {
++                        crate::edit_receipts::remember(
++                            &self.archive,
++                            &chat,
++                            info.id.as_str(),
++                            &target,
++                        );
++                        if crate::edit_receipts::adopt(
++                            &self.archive,
++                            &chat,
++                            info.id.as_str(),
++                            &target,
++                        ) {
++                            self.settle_early_receipts(&chat, &target);
++                        }
++                    }
+                     if let Some(edited) = protocol.edited_message.as_option()
+                         && let Some(mut content) = classify(edited)
+                     {
+@@ -11410,15 +11431,16 @@ impl Worker {
+                 }
+             };
+         let generation = self.begin_edit(&chat, &id);
++        // Patched build: the edit's own id is chosen here and remembered
++        // before it goes, so its first receipts already find the message.
++        let edit_id = client.generate_message_id();
++        crate::edit_receipts::remember(&self.archive, &chat, edit_id.as_str(), &id);
++        let options = whatsapp_rust::EditOptions::default()
++            .with_stanza_id(whatsapp_rust::StanzaId::from_message_id(&edit_id));
+         let commands = self.commands.clone();
+         tokio::spawn(async move {
+             let accepted = client
+-                .edit_message_raw(
+-                    jid,
+-                    id.clone(),
+-                    message,
+-                    whatsapp_rust::EditOptions::default(),
+-                )
++                .edit_message_raw(jid, id.clone(), message, options)
+                 .await
+                 .map(|_| (content, mention_rows))
+                 .map_err(|error| format!("Could not send the edit: {error}"));
+@@ -21274,6 +21296,105 @@ mod receipt_tests {
+             .build()
+     }
+ 
++    /// Patched build: people who open a group after an edit read the edit's
++    /// own id, and Message info must still name them.
++    #[test]
++    fn reads_of_our_edits_count_for_the_messages_they_edit() {
++        let (mut worker, _events, _inbox, _wa) = worker();
++        let group = "120363000000000071@g.us";
++        let first = "12025550161@s.whatsapp.net";
++        let second = "12025550162@s.whatsapp.net";
++        worker.archive.ensure_chat(group, "Group").unwrap();
++        worker
++            .archive
++            .set_group_info(
++                group,
++                None,
++                &[ME.into(), first.into(), second.into()],
++                false,
++            )
++            .unwrap();
++        for (id, timestamp) in [("edited-here", 100), ("edited-on-phone", 200)] {
++            worker.store_message(
++                Message {
++                    chat: group.into(),
++                    ..own_message(id, timestamp)
++                },
++                None,
++                None,
++            );
++            assert!(worker.save_group_recipients(
++                group,
++                id,
++                &[ME.into(), first.into(), second.into()]
++            ));
++        }
++        let read = |worker: &mut Worker, reader: &str, id: &str| {
++            let mut receipt = receipt(group, &[id], ReceiptType::Read);
++            receipt.source.sender = reader.parse().unwrap();
++            receipt.source.is_group = true;
++            worker.on_receipt(&receipt);
++        };
++        let readers = |worker: &Worker, id: &str| -> Vec<String> {
++            worker
++                .archive
++                .receipts(group, id)
++                .unwrap()
++                .into_iter()
++                .filter(|recipient| recipient.read_at.is_some())
++                .map(|recipient| recipient.id)
++                .collect()
++        };
++        // An edit sent from here is remembered before it goes.
++        crate::edit_receipts::remember(&worker.archive, group, "EDIT-HERE", "edited-here");
++        read(&mut worker, first, "EDIT-HERE");
++        read(&mut worker, second, "EDIT-HERE");
++        assert_eq!(readers(&worker, "edited-here"), [first, second]);
++        assert_eq!(
++            worker
++                .archive
++                .message(group, "edited-here")
++                .unwrap()
++                .unwrap()
++                .status,
++            Delivery::Read
++        );
++        // The phone's edit can reach us after its first read.
++        read(&mut worker, first, "EDIT-PHONE");
++        assert!(readers(&worker, "edited-on-phone").is_empty());
++        let edit = Arc::new({
++            let mut proto = wa::Message::default();
++            proto.protocol_message = MessageField::some({
++                let mut proto = wa::message::ProtocolMessage::default();
++                proto.r#type = Some(wa::message::protocol_message::Type::MESSAGE_EDIT);
++                proto.key = MessageField::some({
++                    let mut proto = wa::MessageKey::default();
++                    proto.id = Some("edited-on-phone".into());
++                    proto
++                });
++                proto.edited_message = MessageField::some(wa::Message::text("Edited"));
++                proto
++            });
++            proto
++        });
++        let info = MessageInfo {
++            id: "EDIT-PHONE".into(),
++            source: MessageSource {
++                chat: group.parse().unwrap(),
++                sender: ME.parse().unwrap(),
++                is_from_me: true,
++                is_group: true,
++                ..Default::default()
++            },
++            timestamp: whatsapp_rust::wacore::time::from_secs(210).unwrap(),
++            ..Default::default()
++        };
++        worker.ingest(&edit, &info);
++        assert_eq!(readers(&worker, "edited-on-phone"), [first]);
++        read(&mut worker, second, "EDIT-PHONE");
++        assert_eq!(readers(&worker, "edited-on-phone"), [first, second]);
++    }
++
+     #[test]
+     fn group_checks_wait_for_every_recipient_and_do_not_read_earlier_messages() {
+         let (mut worker, _events, _inbox, _wa) = worker();
+diff --git a/src/edit_receipts.rs b/src/edit_receipts.rs
+new file mode 100644
+index 0000000..6e89611
+--- /dev/null
++++ b/src/edit_receipts.rs
+@@ -0,0 +1,155 @@
++//! Patched build: receipts for an edit count toward the message it edits.
++//!
++//! An edit travels as a message of its own with a fresh id, and people who
++//! open the chat after it send their read receipt for that id, so a group's
++//! Message info named only those who read before the edit. The archive's meta
++//! table remembers which ids are edits of which of our messages, one
++//! `chat\tedit\toriginal` per line, newest last. The map is process-wide like
++//! the other patched sets; edit ids are random, so accounts never collide.
++
++use std::collections::HashMap;
++use std::sync::{Mutex, OnceLock, PoisonError};
++
++use crate::archive::Archive;
++use crate::model::Delivery;
++
++const META_KEY: &str = "fork_edit_ids";
++/// Edits remembered. Older ones are long past their last receipt.
++const KEEP: usize = 2000;
++
++type Edits = HashMap<(String, String), String>;
++
++fn edits() -> std::sync::MutexGuard<'static, Edits> {
++    static EDITS: OnceLock<Mutex<Edits>> = OnceLock::new();
++    EDITS
++        .get_or_init(Default::default)
++        .lock()
++        .unwrap_or_else(PoisonError::into_inner)
++}
++
++fn parse(line: &str) -> Option<(&str, &str, &str)> {
++    let (chat, rest) = line.split_once('\t')?;
++    let (edit, original) = rest.split_once('\t')?;
++    Some((chat, edit, original))
++}
++
++/// Restores the edits this archive remembered, when the backend starts.
++pub fn load(archive: &Archive) {
++    let Ok(Some(stored)) = archive.meta(META_KEY) else {
++        return;
++    };
++    let mut edits = edits();
++    for (chat, edit, original) in stored.lines().filter_map(parse) {
++        edits.insert((chat.to_owned(), edit.to_owned()), original.to_owned());
++    }
++}
++
++/// Notes that `edit` is the id of an edit to our message `original`.
++pub fn remember(archive: &Archive, chat: &str, edit: &str, original: &str) {
++    if edit.is_empty() || edit == original {
++        return;
++    }
++    let key = (chat.to_owned(), edit.to_owned());
++    if edits().insert(key, original.to_owned()).as_deref() == Some(original) {
++        return;
++    }
++    let entry = format!("{chat}\t{edit}\t{original}");
++    let stored = archive.meta(META_KEY).ok().flatten().unwrap_or_default();
++    let mut lines: Vec<&str> = stored
++        .lines()
++        .filter(|line| parse(line).is_some())
++        .collect();
++    lines.push(&entry);
++    let value = lines[lines.len().saturating_sub(KEEP)..].join("\n");
++    if let Err(error) = archive.set_meta(META_KEY, &value) {
++        log::warn!("could not remember an edit: {error}");
++    }
++}
++
++/// A receipt's message ids with each of our edits replaced by the message it
++/// edits, without repeats.
++pub fn resolve(chat: &str, ids: &[impl AsRef<str>]) -> Vec<String> {
++    let edits = edits();
++    let mut resolved: Vec<String> = Vec::with_capacity(ids.len());
++    for id in ids {
++        let id = id.as_ref();
++        let id = edits
++            .get(&(chat.to_owned(), id.to_owned()))
++            .map_or(id, String::as_str)
++            .to_owned();
++        if !resolved.contains(&id) {
++            resolved.push(id);
++        }
++    }
++    resolved
++}
++
++/// Files receipts that arrived under `edit` before it was known to be one
++/// (the phone's edit can be decrypted after its first receipts) under
++/// `original` too. Returns whether there were any.
++pub fn adopt(archive: &Archive, chat: &str, edit: &str, original: &str) -> bool {
++    let Ok(parked) = archive.receipts(chat, edit) else {
++        return false;
++    };
++    let mut adopted = false;
++    for recipient in parked {
++        for (status, at) in [
++            (Delivery::Delivered, recipient.delivered_at),
++            (Delivery::Read, recipient.read_at),
++            (Delivery::Played, recipient.played_at),
++        ] {
++            if let Some(at) = at {
++                adopted |= archive
++                    .file_receipt(chat, original, &recipient.id, status, at)
++                    .unwrap_or(false);
++            }
++        }
++    }
++    adopted
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn an_edits_receipts_count_for_the_message_it_edits() {
++        let archive = Archive::in_memory().unwrap();
++        let chat = "120363000000000001@g.us";
++        remember(&archive, chat, "EDIT-A", "ORIGINAL-A");
++        let ids = [
++            "EDIT-A".to_owned(),
++            "ORIGINAL-A".to_owned(),
++            "OTHER".to_owned(),
++        ];
++        assert_eq!(resolve(chat, &ids), ["ORIGINAL-A", "OTHER"]);
++        // Another chat's message of the same id is left alone.
++        assert_eq!(resolve("120363000000000002@g.us", &ids[..1]), ["EDIT-A"]);
++    }
++
++    #[test]
++    fn remembered_edits_survive_a_restart() {
++        let archive = Archive::in_memory().unwrap();
++        let chat = "120363000000000003@g.us";
++        remember(&archive, chat, "EDIT-B", "ORIGINAL-B");
++        edits().remove(&(chat.to_owned(), "EDIT-B".to_owned()));
++        load(&archive);
++        assert_eq!(resolve(chat, &["EDIT-B".to_owned()]), ["ORIGINAL-B"]);
++    }
++
++    #[test]
++    fn receipts_filed_under_an_edit_move_to_the_message() {
++        let archive = Archive::in_memory().unwrap();
++        let chat = "120363000000000004@g.us";
++        let reader = "15550000001@s.whatsapp.net";
++        archive
++            .file_receipt(chat, "EDIT-C", reader, Delivery::Read, 1_700_000_100)
++            .unwrap();
++        assert!(adopt(&archive, chat, "EDIT-C", "ORIGINAL-C"));
++        let receipts = archive.receipts(chat, "ORIGINAL-C").unwrap();
++        assert_eq!(receipts.len(), 1);
++        assert_eq!(receipts[0].id, reader);
++        assert_eq!(receipts[0].read_at, Some(1_700_000_100));
++        assert!(!adopt(&archive, chat, "NOTHING", "ORIGINAL-C"));
++    }
++}
+diff --git a/src/lib.rs b/src/lib.rs
+index f55d895..e0bed1c 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -25,6 +25,7 @@ pub mod clipboard;
+ #[cfg(any(test, feature = "demo"))]
+ pub mod demo;
+ pub mod diagnostics;
++pub mod edit_receipts;
+ pub mod emoji;
+ pub mod geo;
+ pub mod group_admin;
